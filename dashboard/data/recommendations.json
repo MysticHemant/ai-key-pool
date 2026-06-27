@@ -1,0 +1,34 @@
+{
+  "research_date": "2026-06-27",
+  "new_providers": [
+    {
+      "name": "TestProvider",
+      "type": "provider",
+      "description": "New provider",
+      "action": "add_key"
+    }
+  ],
+  "free_tiers": [],
+  "new_models": [
+    {
+      "name": "gpt-5",
+      "type": "model",
+      "description": "New model",
+      "action": "monitor"
+    }
+  ],
+  "provider_changes": [],
+  "recommendations": [
+    {
+      "priority": "high",
+      "action": "New provider",
+      "reason": "TestProvider"
+    },
+    {
+      "priority": "medium",
+      "action": "New model",
+      "reason": "gpt-5"
+    }
+  ],
+  "summary": "Test research"
+}

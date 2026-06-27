@@ -1,0 +1,50 @@
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Environment
+.env
+.venv
+env/
+venv/
+
+# Runtime data (contains API keys)
+data/*.json
+
+# Dashboard generated data (committed by GitHub Actions)
+# dashboard/data/*.json  # Keep tracked for Pages
+
+# Logs
+*.log
+
+# Python test/cache
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Local runtime
+*.sqlite3
+
+# macOS resource forks
+._*
+
+# Local secrets
+*.env
+.env.local

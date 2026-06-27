@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Key Pool — Status</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0d1117; color: #c9d1d9; padding: 20px; }
+        .container { max-width: 800px; margin: 0 auto; }
+        h1 { color: #58a6ff; margin-bottom: 8px; font-size: 24px; }
+        .subtitle { color: #8b949e; margin-bottom: 24px; font-size: 14px; }
+        .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 20px; margin-bottom: 16px; }
+        .card h2 { color: #58a6ff; font-size: 16px; margin-bottom: 12px; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+        .stat { text-align: center; padding: 12px; background: #0d1117; border-radius: 6px; }
+        .stat .value { font-size: 28px; font-weight: bold; }
+        .stat .label { font-size: 12px; color: #8b949e; margin-top: 4px; }
+        .ok { color: #3fb950; }
+        .warn { color: #d29922; }
+        .err { color: #f85149; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid #30363d; font-size: 14px; }
+        th { color: #8b949e; font-weight: 600; }
+        .status-badge { padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+        .badge-active { background: #238636; color: #fff; }
+        .badge-exhausted { background: #9e6a03; color: #fff; }
+        .badge-disabled { background: #da3633; color: #fff; }
+        .nav { margin-bottom: 20px; }
+        .nav a { color: #58a6ff; text-decoration: none; margin-right: 16px; font-size: 14px; }
+        .nav a:hover { text-decoration: underline; }
+        .loading { color: #8b949e; text-align: center; padding: 40px; }
+        #last-update { color: #8b949e; font-size: 12px; margin-top: 8px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="nav"><a href="index.html">Status</a> <a href="recommendations.html">Recommendations</a></div>
+        <h1>AI Key Pool</h1>
+        <p class="subtitle">System Status Dashboard</p>
+
+        <div id="loading" class="loading">Loading status...</div>
+        <div id="content" style="display:none;">
+            <div class="card">
+                <h2>Overview</h2>
+                <div class="grid">
+                    <div class="stat"><div class="value" id="total">0</div><div class="label">Total Keys</div></div>
+                    <div class="stat"><div class="value ok" id="healthy">0</div><div class="label">Healthy</div></div>
+                    <div class="stat"><div class="value warn" id="exhausted">0</div><div class="label">Exhausted</div></div>
+                    <div class="stat"><div class="value err" id="disabled">0</div><div class="label">Disabled</div></div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>Active Provider</h2>
+                <p id="provider" style="font-size:18px; font-weight:600;">—</p>
+                <p id="active-key" style="color:#8b949e; font-size:13px; margin-top:4px;">—</p>
+            </div>
+
+            <div class="card">
+                <h2>Providers</h2>
+                <table>
+                    <thead><tr><th>Provider</th><th>Keys</th><th>Healthy</th><th>Status</th></tr></thead>
+                    <tbody id="provider-table"></tbody>
+                </table>
+            </div>
+
+            <p id="last-update"></p>
+        </div>
+    </div>
+
+    <script>
+        async function loadStatus() {
+            try {
+                const resp = await fetch('data/status.json');
+                if (!resp.ok) throw new Error('No data');
+                const d = await resp.json();
+
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('content').style.display = 'block';
+
+                document.getElementById('total').textContent = d.total_keys;
+                document.getElementById('healthy').textContent = d.healthy_keys;
+                document.getElementById('exhausted').textContent = d.exhausted_keys;
+                document.getElementById('disabled').textContent = d.disabled_keys;
+                document.getElementById('provider').textContent = d.active_provider || 'None';
+                document.getElementById('active-key').textContent = d.active_key ? `Active key: ${d.active_key.key_id}` : 'No active key';
+
+                const tbody = document.getElementById('provider-table');
+                tbody.innerHTML = '';
+                for (const [name, info] of Object.entries(d.providers || {})) {
+                    const row = document.createElement('tr');
+                    const healthyCount = info.keys.filter(k => k.status === 'active').length;
+                    const exhaustedCount = info.keys.filter(k => k.status === 'exhausted').length;
+                    const disabledCount = info.keys.filter(k => k.status === 'disabled').length;
+                    let badgeClass = 'badge-active';
+                    let badgeText = 'OK';
+                    if (disabledCount > 0) { badgeClass = 'badge-disabled'; badgeText = 'DEGRADED'; }
+                    else if (exhaustedCount > 0) { badgeClass = 'badge-exhausted'; badgeText = 'PARTIAL'; }
+                    row.innerHTML = `<td>${name}</td><td>${info.total_keys}</td><td>${healthyCount}</td><td><span class="status-badge ${badgeClass}">${badgeText}</span></td>`;
+                    tbody.appendChild(row);
+                }
+
+                document.getElementById('last-update').textContent = `Last updated: ${d.last_update || 'Never'}`;
+            } catch (e) {
+                document.getElementById('loading').textContent = 'No status data available. Run daily maintenance first.';
+            }
+        }
+        loadStatus();
+        setInterval(loadStatus, 300000);
+    </script>
+</body>
+</html>

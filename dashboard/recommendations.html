@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Key Pool — Recommendations</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0d1117; color: #c9d1d9; padding: 20px; }
+        .container { max-width: 800px; margin: 0 auto; }
+        h1 { color: #58a6ff; margin-bottom: 8px; font-size: 24px; }
+        .subtitle { color: #8b949e; margin-bottom: 24px; font-size: 14px; }
+        .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 20px; margin-bottom: 16px; }
+        .card h2 { color: #58a6ff; font-size: 16px; margin-bottom: 12px; }
+        .nav { margin-bottom: 20px; }
+        .nav a { color: #58a6ff; text-decoration: none; margin-right: 16px; font-size: 14px; }
+        .nav a:hover { text-decoration: underline; }
+        .finding { padding: 10px; background: #0d1117; border-radius: 6px; margin-bottom: 8px; }
+        .finding .name { font-weight: 600; color: #c9d1d9; }
+        .finding .desc { color: #8b949e; font-size: 13px; margin-top: 2px; }
+        .finding .action { font-size: 12px; margin-top: 4px; }
+        .action-add { color: #3fb950; }
+        .action-monitor { color: #d29922; }
+        .action-none { color: #8b949e; }
+        .summary { color: #8b949e; font-style: italic; margin-bottom: 16px; }
+        .date { color: #8b949e; font-size: 12px; margin-top: 8px; }
+        .loading { color: #8b949e; text-align: center; padding: 40px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="nav"><a href="index.html">Status</a> <a href="recommendations.html">Recommendations</a></div>
+        <h1>AI Key Pool</h1>
+        <p class="subtitle">Provider Recommendations</p>
+
+        <div id="loading" class="loading">Loading recommendations...</div>
+        <div id="content" style="display:none;">
+            <div class="card">
+                <h2>Research Date</h2>
+                <p id="research-date">—</p>
+                <p id="summary" class="summary"></p>
+            </div>
+
+            <div class="card" id="providers-card" style="display:none;">
+                <h2>New Providers</h2>
+                <div id="providers-list"></div>
+            </div>
+
+            <div class="card" id="tiers-card" style="display:none;">
+                <h2>Free Tier Changes</h2>
+                <div id="tiers-list"></div>
+            </div>
+
+            <div class="card" id="models-card" style="display:none;">
+                <h2>New Models</h2>
+                <div id="models-list"></div>
+            </div>
+
+            <div class="card" id="changes-card" style="display:none;">
+                <h2>Provider Changes</h2>
+                <div id="changes-list"></div>
+            </div>
+
+            <div class="card" id="actions-card" style="display:none;">
+                <h2>Recommended Actions</h2>
+                <div id="actions-list"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function renderList(containerId, items, cardId) {
+            if (!items || items.length === 0) return;
+            document.getElementById(cardId).style.display = 'block';
+            const container = document.getElementById(containerId);
+            items.forEach(item => {
+                const div = document.createElement('div');
+                div.className = 'finding';
+                div.innerHTML = `<div class="name">${item.name || 'Unknown'}</div><div class="desc">${item.description || ''}</div>`;
+                container.appendChild(div);
+            });
+        }
+
+        async function loadRecommendations() {
+            try {
+                const resp = await fetch('data/recommendations.json');
+                if (!resp.ok) throw new Error('No data');
+                const d = await resp.json();
+
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('content').style.display = 'block';
+
+                document.getElementById('research-date').textContent = d.research_date || 'No data';
+                document.getElementById('summary').textContent = d.summary || '';
+
+                renderList('providers-list', d.new_providers, 'providers-card');
+                renderList('tiers-list', d.free_tiers, 'tiers-card');
+                renderList('models-list', d.new_models, 'models-card');
+                renderList('changes-list', d.provider_changes, 'changes-card');
+
+                if (d.recommendations && d.recommendations.length > 0) {
+                    document.getElementById('actions-card').style.display = 'block';
+                    const container = document.getElementById('actions-list');
+                    d.recommendations.forEach(r => {
+                        const div = document.createElement('div');
+                        div.className = 'finding';
+                        const cls = r.priority === 'high' ? 'action-add' : 'action-monitor';
+                        div.innerHTML = `<div class="name">${r.action}</div><div class="desc">${r.reason}</div><div class="action ${cls}">${r.priority} priority</div>`;
+                        container.appendChild(div);
+                    });
+                }
+            } catch (e) {
+                document.getElementById('loading').textContent = 'No recommendation data available. Run daily maintenance first.';
+            }
+        }
+        loadRecommendations();
+    </script>
+</body>
+</html>
