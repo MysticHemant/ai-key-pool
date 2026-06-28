@@ -102,58 +102,111 @@ def send_daily_summary(
     start_time = time.monotonic()
 
     # ── Stage 2: SMTP connection ──
-    logger.info("EMAIL STAGE: Connecting to %s:%d", smtp_host, smtp_port)
+    logger.info("EMAIL STAGE: Connecting to %s:%d (timeout=30s)", smtp_host, smtp_port)
     server = None
     try:
         server = smtplib.SMTP(smtp_host, smtp_port, timeout=30)
+        logger.info("EMAIL STAGE: Connected to %s:%d", smtp_host, smtp_port)
     except smtplib.SMTPConnectError as e:
-        raise EmailDeliveryError("connection", f"SMTP connect failed: {e}")
+        logger.error("EMAIL STAGE FAIL: SMTPConnectError at connection — %s", e)
+        raise EmailDeliveryError("connection", f"SMTP connect failed: {type(e).__name__}: {e}")
+    except ConnectionResetError as e:
+        logger.error("EMAIL STAGE FAIL: ConnectionResetError at connection — %s", e)
+        raise EmailDeliveryError("connection", f"Connection reset by server: {type(e).__name__}: {e}")
+    except BrokenPipeError as e:
+        logger.error("EMAIL STAGE FAIL: BrokenPipeError at connection — %s", e)
+        raise EmailDeliveryError("connection", f"Broken pipe during connect: {type(e).__name__}: {e}")
     except OSError as e:
-        raise EmailDeliveryError("connection", f"Network error: {e}")
+        logger.error("EMAIL STAGE FAIL: OSError at connection — errno=%s %s", getattr(e, 'errno', '?'), e)
+        raise EmailDeliveryError("connection", f"Network error: {type(e).__name__}: {e}")
     except Exception as e:
-        raise EmailDeliveryError("connection", f"Connection failed: {e}")
+        logger.error("EMAIL STAGE FAIL: Unexpected error at connection — %s: %s", type(e).__name__, e)
+        raise EmailDeliveryError("connection", f"Connection failed: {type(e).__name__}: {e}")
 
     # ── Stage 3: TLS ──
-    logger.info("EMAIL STAGE: Starting TLS")
+    logger.info("EMAIL STAGE: Starting TLS with %s:%d", smtp_host, smtp_port)
     try:
         server.starttls()
-        logger.info("EMAIL STAGE: TLS established")
+        logger.info("EMAIL STAGE: TLS established with %s:%d", smtp_host, smtp_port)
     except smtplib.SMTPException as e:
+        logger.error("EMAIL STAGE FAIL: SMTPException at TLS — %s: %s", type(e).__name__, e)
         _safe_quit(server)
-        raise EmailDeliveryError("tls", f"TLS negotiation failed: {e}")
+        raise EmailDeliveryError("tls", f"TLS negotiation failed: {type(e).__name__}: {e}")
+    except ConnectionResetError as e:
+        logger.error("EMAIL STAGE FAIL: ConnectionResetError at TLS — %s", e)
+        _safe_quit(server)
+        raise EmailDeliveryError("tls", f"Connection reset during TLS: {type(e).__name__}: {e}")
+    except BrokenPipeError as e:
+        logger.error("EMAIL STAGE FAIL: BrokenPipeError at TLS — %s", e)
+        _safe_quit(server)
+        raise EmailDeliveryError("tls", f"Broken pipe during TLS: {type(e).__name__}: {e}")
+    except OSError as e:
+        logger.error("EMAIL STAGE FAIL: OSError at TLS — %s: %s", type(e).__name__, e)
+        _safe_quit(server)
+        raise EmailDeliveryError("tls", f"Network error during TLS: {type(e).__name__}: {e}")
 
     # ── Stage 4: Authentication ──
     logger.info("EMAIL STAGE: Authenticating as %s", smtp_user)
     try:
         server.login(smtp_user, smtp_password)
-        logger.info("EMAIL STAGE: Authentication successful")
+        logger.info("EMAIL STAGE: Authentication successful for %s", smtp_user)
     except smtplib.SMTPAuthenticationError as e:
+        logger.error("EMAIL STAGE FAIL: SMTPAuthenticationError — %s", e)
         _safe_quit(server)
-        raise EmailDeliveryError("auth", f"SMTP authentication failed (check username/password)")
+        raise EmailDeliveryError("auth", f"SMTP authentication failed (check username/password): {type(e).__name__}: {e}")
     except smtplib.SMTPException as e:
+        logger.error("EMAIL STAGE FAIL: SMTPException at auth — %s: %s", type(e).__name__, e)
         _safe_quit(server)
-        raise EmailDeliveryError("auth", f"Authentication error: {e}")
+        raise EmailDeliveryError("auth", f"Authentication error: {type(e).__name__}: {e}")
+    except ConnectionResetError as e:
+        logger.error("EMAIL STAGE FAIL: ConnectionResetError at auth — %s", e)
+        _safe_quit(server)
+        raise EmailDeliveryError("auth", f"Connection reset during auth: {type(e).__name__}: {e}")
+    except BrokenPipeError as e:
+        logger.error("EMAIL STAGE FAIL: BrokenPipeError at auth — %s", e)
+        _safe_quit(server)
+        raise EmailDeliveryError("auth", f"Broken pipe during auth: {type(e).__name__}: {e}")
+    except OSError as e:
+        logger.error("EMAIL STAGE FAIL: OSError at auth — %s: %s", type(e).__name__, e)
+        _safe_quit(server)
+        raise EmailDeliveryError("auth", f"Network error during auth: {type(e).__name__}: {e}")
 
     # ── Stage 5: Send ──
-    logger.info("EMAIL STAGE: Sending to %s", recipient)
+    logger.info("EMAIL STAGE: Sending to %s from %s", recipient, smtp_user)
     try:
         server.sendmail(smtp_user, [recipient], msg.as_string())
         elapsed = time.monotonic() - start_time
-        logger.info("EMAIL STAGE: Send successful in %.1fs", elapsed)
+        logger.info("EMAIL STAGE: Send successful in %.1fs to %s", elapsed, recipient)
         _safe_quit(server)
         return True
     except smtplib.SMTPRecipientsRefused as e:
+        logger.error("EMAIL STAGE FAIL: SMTPRecipientsRefused — %s", e)
         _safe_quit(server)
-        raise EmailDeliveryError("send", f"Recipient rejected: {e}")
+        raise EmailDeliveryError("send", f"Recipient rejected: {type(e).__name__}: {e}")
     except smtplib.SMTPSenderRefused as e:
+        logger.error("EMAIL STAGE FAIL: SMTPSenderRefused — %s", e)
         _safe_quit(server)
-        raise EmailDeliveryError("send", f"Sender rejected: {e}")
+        raise EmailDeliveryError("send", f"Sender rejected: {type(e).__name__}: {e}")
     except smtplib.SMTPDataError as e:
+        logger.error("EMAIL STAGE FAIL: SMTPDataError — %s", e)
         _safe_quit(server)
-        raise EmailDeliveryError("send", f"Data error: {e}")
+        raise EmailDeliveryError("send", f"Data error: {type(e).__name__}: {e}")
     except smtplib.SMTPException as e:
+        logger.error("EMAIL STAGE FAIL: SMTPException at send — %s: %s", type(e).__name__, e)
         _safe_quit(server)
-        raise EmailDeliveryError("send", f"Send failed: {e}")
+        raise EmailDeliveryError("send", f"Send failed: {type(e).__name__}: {e}")
+    except ConnectionResetError as e:
+        logger.error("EMAIL STAGE FAIL: ConnectionResetError at send — %s", e)
+        _safe_quit(server)
+        raise EmailDeliveryError("send", f"Connection reset during send: {type(e).__name__}: {e}")
+    except BrokenPipeError as e:
+        logger.error("EMAIL STAGE FAIL: BrokenPipeError at send — %s", e)
+        _safe_quit(server)
+        raise EmailDeliveryError("send", f"Broken pipe during send: {type(e).__name__}: {e}")
+    except OSError as e:
+        logger.error("EMAIL STAGE FAIL: OSError at send — %s: %s", type(e).__name__, e)
+        _safe_quit(server)
+        raise EmailDeliveryError("send", f"Network error during send: {type(e).__name__}: {e}")
 
 
 def _safe_quit(server: smtplib.SMTP) -> None:

@@ -183,19 +183,24 @@ def run_daily_maintenance() -> dict:
     if research_result is not _EXCEPTION:
         research_data = research_result
         findings_count = len(research_data.get("findings", []))
+        research_success = research_data.get("_success", True)
         step_results["research"] = {
-            "status": "ok",
+            "status": "ok" if research_success else "error",
             "duration_seconds": round(research_duration, 2),
             "findings_count": findings_count,
             "has_llm_summary": research_data.get("has_llm_summary", False),
         }
-        logger.info("STEP END: Research — %d findings in %.1fs", findings_count, research_duration)
+        if research_success:
+            logger.info("STEP END: Research — %d findings in %.1fs", findings_count, research_duration)
+        else:
+            errors.append(f"Research failed: {research_data.get('summary', 'unknown reason')}")
+            logger.error("STEP FAIL: Research — %s (%.1fs)", research_data.get("summary", "unknown"), research_duration)
     else:
         step_results["research"] = {
             "status": "error",
             "duration_seconds": round(research_duration, 2),
         }
-        errors.append("Research failed")
+        errors.append("Research failed with exception")
         logger.error("STEP FAIL: Research (%.1fs)", research_duration)
 
     # ── Step 3: Dashboard status ──
@@ -253,7 +258,8 @@ def run_daily_maintenance() -> dict:
             "status": "error",
             "duration_seconds": round(email_duration, 2),
         }
-        errors.append("Email delivery failed")
+        # The actual error was already logged by _do_send_email's except handler
+        errors.append("Email delivery failed — see EMAIL FAILED log above for SMTP stage details")
         logger.error("STEP FAIL: Email (%.1fs)", email_duration)
 
     # ── Summary ──

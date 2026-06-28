@@ -131,6 +131,9 @@ class KeyRotator:
                 return result
 
             except Exception as e:
+                # Log the ORIGINAL exception details BEFORE classification
+                self._log_original_error(provider, key.key_id, e)
+
                 # Determine error type from exception
                 error_type = self._classify_error(e)
                 self.key_manager.mark_failure(key.key_id, error_type)
@@ -185,6 +188,43 @@ class KeyRotator:
         if is_auth_error:
             return "auth_error"
         return "unknown"
+
+    def _log_original_error(self, provider: str, key_id: str, error: Exception) -> None:
+        """Log the FULL original exception details before classification.
+
+        Records: exception type, exception message, HTTP status code,
+        response body, and provider details. Never hides the original error.
+
+        Args:
+            provider: Provider name
+            key_id: Key that was used
+            error: The original exception
+        """
+        exc_type = type(error).__name__
+        exc_msg = str(error)
+
+        logger.error(
+            "PROVIDER ERROR: provider=%s key=%s exception_type=%s message=%s",
+            provider, key_id, exc_type, exc_msg,
+        )
+
+        # If it's a ProviderError, log HTTP-specific details
+        if hasattr(error, "status_code") and error.status_code is not None:
+            logger.error(
+                "PROVIDER HTTP: status_code=%d provider=%s key=%s",
+                error.status_code, provider, key_id,
+            )
+        if hasattr(error, "error_type") and error.error_type:
+            logger.error(
+                "PROVIDER CLASSIFICATION: error_type=%s provider=%s key=%s",
+                error.error_type, provider, key_id,
+            )
+
+        # Log the full traceback at debug level for deeper investigation
+        logger.debug(
+            "PROVIDER TRACEBACK: provider=%s key=%s",
+            provider, key_id, exc_info=True,
+        )
 
     def force_rotate(self, provider: str, current_key_id: str) -> Optional[KeyEntry]:
         """Force rotation to next key regardless of health.

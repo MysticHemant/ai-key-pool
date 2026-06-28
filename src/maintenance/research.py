@@ -529,15 +529,19 @@ def research_providers(
     if summarized:
         findings_result = summarized
         findings_result["_raw_count"] = len(raw_findings)
+        findings_result["_success"] = True
     elif raw_findings:
         # LLM failed but we have raw data — return raw findings in expected format
         findings_result = _build_raw_fallback(raw_findings)
+        findings_result["_success"] = True
+        findings_result["_llm_failed"] = True
     else:
         # No sources could be fetched
         findings_result = _empty_research_result(
             "No data could be collected from official sources. "
             "Check network connectivity and source availability."
         )
+        findings_result["_success"] = False
 
     # Step 4: Merge with history
     history = _load_history(history_path)
