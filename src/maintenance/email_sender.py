@@ -12,6 +12,7 @@ Supports two TLS modes:
 
 import os
 import smtplib
+import ssl
 import time
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -130,10 +131,12 @@ def send_daily_summary(
     server = None
     try:
         if use_ssl:
-            server = smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=30)
+            ctx = ssl.create_default_context()
+            logger.info("EMAIL STAGE: SMTP_SSL with modern TLS context (protocol=%s, verify=%s)",
+                        ctx.protocol, ctx.verify_mode)
+            server = smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=30, context=ctx)
         else:
             server = smtplib.SMTP(smtp_host, smtp_port, timeout=30)
-        logger.info("EMAIL STAGE: Connected to %s:%d", smtp_host, smtp_port)
     except smtplib.SMTPConnectError as e:
         logger.error("EMAIL STAGE FAIL: SMTPConnectError at connection — %s", e)
         raise EmailDeliveryError("connection", f"SMTP connect failed: {type(e).__name__}: {e}")
@@ -149,6 +152,33 @@ def send_daily_summary(
     except Exception as e:
         logger.error("EMAIL STAGE FAIL: Unexpected error at connection — %s: %s", type(e).__name__, e)
         raise EmailDeliveryError("connection", f"Connection failed: {type(e).__name__}: {e}")
+
+    # ── Stage 3b: EHLO and server greeting ──
+    try:
+        ehlo_resp = server.ehlo()
+        greeting_code = ehlo_resp[0] if isinstance(ehlo_resp, tuple) else ehlo_resp
+        logger.info("EMAIL STAGE: EHLO greeting received — code=%s", greeting_code)
+        caps = server.esmtp_features
+        if caps:
+            logger.info("EMAIL STAGE: Server capabilities — %s", ", ".join(sorted(caps.keys())))
+        else:
+            logger.info("EMAIL STAGE: No ESMTP capabilities advertised")
+    except smtplib.SMTPException as e:
+        logger.error("EMAIL STAGE FAIL: SMTPException at EHLO — %s: %s", type(e).__name__, e)
+        _safe_quit(server)
+        raise EmailDeliveryError("greeting", f"EHLO failed: {type(e).__name__}: {e}")
+    except ConnectionResetError as e:
+        logger.error("EMAIL STAGE FAIL: ConnectionResetError at EHLO — %s", e)
+        _safe_quit(server)
+        raise EmailDeliveryError("greeting", f"Connection reset during EHLO: {type(e).__name__}: {e}")
+    except BrokenPipeError as e:
+        logger.error("EMAIL STAGE FAIL: BrokenPipeError at EHLO — %s", e)
+        _safe_quit(server)
+        raise EmailDeliveryError("greeting", f"Broken pipe during EHLO: {type(e).__name__}: {e}")
+    except OSError as e:
+        logger.error("EMAIL STAGE FAIL: OSError at EHLO — %s: %s", type(e).__name__, e)
+        _safe_quit(server)
+        raise EmailDeliveryError("greeting", f"Network error during EHLO: {type(e).__name__}: {e}")
 
     # ── Stage 4: TLS (STARTTLS only — SMTP_SSL is already encrypted) ──
     if use_ssl:
