@@ -77,9 +77,12 @@ def run_daily_maintenance() -> dict:
 
     config = load_config()
 
+    # Dashboard output directory (GitHub Pages serves from here)
+    dashboard_data = Path(__file__).parent.parent.parent / "dashboard" / "data"
+
     # ── Step 0a: Validate configuration ──
     logger.info("STEP START: Configuration validation")
-    config_report = validate_config(config.data_dir)
+    config_report = validate_config(dashboard_data)
     step_results["config_validation"] = {
         "status": "ok" if config_report.is_valid else "warnings",
         "is_valid": config_report.is_valid,
@@ -149,7 +152,6 @@ def run_daily_maintenance() -> dict:
 
     stats = {"registry": {"total_keys": 0, "by_status": {}}, "health": {}}
     research_data: dict = {"findings": [], "summary": "Not yet researched"}
-    dashboard_data = Path(__file__).parent.parent.parent / "dashboard" / "data"
 
     # ── Step 1: Health check ──
     logger.info("STEP START: Health check")
@@ -337,16 +339,20 @@ def _do_send_email(
             "healthy_keys": 0,
         }
 
-    return send_daily_summary(
-        smtp_host=os.environ.get("SMTP_HOST", ""),
-        smtp_port=int(os.environ.get("SMTP_PORT", "587")),
-        smtp_user=os.environ.get("SMTP_USER", ""),
-        smtp_password=os.environ.get("SMTP_PASSWORD", ""),
-        recipient=os.environ.get("EMAIL_RECIPIENT", ""),
-        status=status_data,
-        recommendations=research_data,
-        errors=errors,
-    )
+    try:
+        return send_daily_summary(
+            smtp_host=os.environ.get("SMTP_HOST", ""),
+            smtp_port=int(os.environ.get("SMTP_PORT", "587")),
+            smtp_user=os.environ.get("SMTP_USER", ""),
+            smtp_password=os.environ.get("SMTP_PASSWORD", ""),
+            recipient=os.environ.get("EMAIL_RECIPIENT", ""),
+            status=status_data,
+            recommendations=research_data,
+            errors=errors,
+        )
+    except EmailDeliveryError as e:
+        logger.error("EMAIL FAILED at stage '%s': %s", e.stage, e.detail)
+        raise
 
 
 def _log_github_actions_diagnostics(
@@ -367,37 +373,45 @@ def _log_github_actions_diagnostics(
     Never logs secret values — only counts and status.
     """
     logger.info("::group::Diagnostics")
-    logger.info("DIAGNOSTIC loaded_providers=%s", json.dumps(loaded_providers))
-    logger.info("DIAGNOSTIC keys_loaded=%d", keys_loaded)
-    logger.info("DIAGNOSTIC active_provider=%s", active_provider)
-    logger.info("DIAGNOSTIC available_providers=%s", json.dumps(available_providers))
 
-    # Config validation
+    # ── Section 1: Configuration ──
+    logger.info("=== CONFIGURATION ===")
     logger.info("DIAGNOSTIC config_is_valid=%s", config_report.is_valid)
     logger.info("DIAGNOSTIC config_secrets_checked=%d", config_report.total_secrets_checked)
     logger.info("DIAGNOSTIC config_secrets_ok=%d", config_report.total_secrets_ok)
     logger.info("DIAGNOSTIC config_warnings=%d", len(config_report.warnings))
     logger.info("DIAGNOSTIC config_errors=%d", len(config_report.errors))
-
-    # Providers detected vs configured
     logger.info("DIAGNOSTIC providers_detected=%s", json.dumps(config_report.providers_detected))
     logger.info("DIAGNOSTIC providers_configured=%s", json.dumps(config_report.providers_configured))
+    for t in config_report.typo_suggestions:
+        logger.warning("DIAGNOSTIC config_typo=%s", json.dumps(t))
 
-    # Plugin status
+    # ── Section 2: Providers ──
+    logger.info("=== PROVIDERS ===")
+    logger.info("DIAGNOSTIC loaded_providers=%s", json.dumps(loaded_providers))
+    logger.info("DIAGNOSTIC available_providers=%s", json.dumps(available_providers))
+    logger.info("DIAGNOSTIC active_provider=%s", active_provider)
     for pname, pstatus in provider_status.items():
         logger.info("DIAGNOSTIC plugin_%s=%s", pname, pstatus.get("adapter", "unknown"))
 
-    # Step results
-    for step_name, step_info in step_results.items():
-        status = step_info.get("status", "unknown")
-        duration = step_info.get("duration_seconds", 0)
-        logger.info("DIAGNOSTIC step_%s=%s (%.1fs)", step_name, status, duration)
+    # ── Section 3: Keys ──
+    logger.info("=== KEYS ===")
+    logger.info("DIAGNOSTIC keys_loaded=%d", keys_loaded)
+    health_result = step_results.get("health_check", {})
+    logger.info("DIAGNOSTIC health_check_status=%s", health_result.get("status", "unknown"))
+    if health_result.get("by_status"):
+        for status_name, count in health_result["by_status"].items():
+            logger.info("DIAGNOSTIC keys_%s=%d", status_name, count)
 
-    logger.info("DIAGNOSTIC total_duration=%.1fs", overall_duration)
-    logger.info("DIAGNOSTIC workflow_status=%s", workflow_status)
-    logger.info("DIAGNOSTIC error_count=%d", len(errors))
+    # ── Section 4: Research ──
+    logger.info("=== RESEARCH ===")
+    research_result = step_results.get("research", {})
+    logger.info("DIAGNOSTIC research_status=%s", research_result.get("status", "unknown"))
+    logger.info("DIAGNOSTIC research_findings=%d", research_result.get("findings_count", 0))
+    logger.info("DIAGNOSTIC research_llm_summary=%s", research_result.get("has_llm_summary", False))
 
-    # Dashboard files
+    # ── Section 5: Dashboard ──
+    logger.info("=== DASHBOARD ===")
     dashboard_data = Path(__file__).parent.parent.parent / "dashboard" / "data"
     status_exists = (dashboard_data / "status.json").exists()
     recs_exists = (dashboard_data / "recommendations.json").exists()
@@ -405,10 +419,28 @@ def _log_github_actions_diagnostics(
     logger.info("DIAGNOSTIC dashboard_status_json=%s", "present" if status_exists else "missing")
     logger.info("DIAGNOSTIC dashboard_recommendations_json=%s", "present" if recs_exists else "missing")
     logger.info("DIAGNOSTIC configuration_report_json=%s", "present" if config_exists else "missing")
+    status_step = step_results.get("status_report", {})
+    recs_step = step_results.get("recommendations", {})
+    logger.info("DIAGNOSTIC status_generation=%s", status_step.get("status", "unknown"))
+    logger.info("DIAGNOSTIC recommendations_generation=%s", recs_step.get("status", "unknown"))
 
-    # Email sent
+    # ── Section 6: Email ──
+    logger.info("=== EMAIL ===")
     email_step = step_results.get("email", {})
-    logger.info("DIAGNOSTIC email_sent=%s", email_step.get("status", "unknown"))
+    email_status = email_step.get("status", "unknown")
+    logger.info("DIAGNOSTIC email_status=%s", email_status)
+    logger.info("DIAGNOSTIC email_duration=%.1fs", email_step.get("duration_seconds", 0))
+    if email_status == "error":
+        logger.warning("DIAGNOSTIC email_error=see EMAIL FAILED log above for stage details")
+
+    # ── Section 7: Overall Result ──
+    logger.info("=== OVERALL RESULT ===")
+    logger.info("DIAGNOSTIC workflow_status=%s", workflow_status)
+    logger.info("DIAGNOSTIC total_duration=%.1fs", overall_duration)
+    logger.info("DIAGNOSTIC error_count=%d", len(errors))
+    if errors:
+        for err in errors:
+            logger.warning("DIAGNOSTIC error=%s", err)
 
     logger.info("::endgroup::")
 

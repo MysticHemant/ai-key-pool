@@ -357,6 +357,20 @@ def _llm_summarize(
     rotator = KeyRotator(config, key_manager)
     provider_name = config.active_provider
 
+    # Diagnostic: log registry state for this provider
+    all_providers = key_manager.registry.get_all_providers()
+    healthy_keys = key_manager.registry.get_healthy_keys(provider_name)
+    all_provider_keys = key_manager.registry.get_keys_for_provider(provider_name)
+    logger.info(
+        "RESEARCH DIAGNOSTIC: provider=%s, all_providers=%s, healthy_keys=%d, all_keys=%d",
+        provider_name, all_providers, len(healthy_keys), len(all_provider_keys),
+    )
+    for k in all_provider_keys:
+        logger.info(
+            "RESEARCH DIAGNOSTIC: key=%s status=%s failure_count=%d success_count=%d",
+            k.key_id, k.status.value, k.failure_count, k.success_count,
+        )
+
     try:
         provider = create_provider(provider_name)
     except ValueError as e:

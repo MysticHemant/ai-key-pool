@@ -167,7 +167,22 @@ class KeyRotator:
             return "rate_limit"
         if "quota" in error_str or "exceeded" in error_str:
             return "quota_exhausted"
-        if "auth" in error_str or "401" in error_str or "invalid" in error_str:
+
+        # Auth errors: must be specific auth/credential failures
+        # "invalid model" or "invalid request" are NOT auth errors
+        is_auth_error = False
+        if "401" in error_str or "403" in error_str:
+            is_auth_error = True
+        elif "auth" in error_str:
+            # Check it's not "invalid model" or "invalid request"
+            if "invalid" in error_str:
+                if "invalid api key" in error_str or "invalid credentials" in error_str:
+                    is_auth_error = True
+                # "invalid model", "invalid request" → not auth error
+            else:
+                is_auth_error = True
+
+        if is_auth_error:
             return "auth_error"
         return "unknown"
 

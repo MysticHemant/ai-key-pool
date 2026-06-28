@@ -1,0 +1,67 @@
+{
+  "timestamp": "2026-06-28T08:10:35.698242+00:00",
+  "is_valid": false,
+  "total_secrets_checked": 8,
+  "total_secrets_ok": 3,
+  "master_key": {
+    "name": "AIKEYPOOL_MASTER_KEY",
+    "configured": false,
+    "has_value": false
+  },
+  "active_provider": {
+    "name": "AIKEYPOOL_ACTIVE_PROVIDER",
+    "configured": true,
+    "has_value": true
+  },
+  "provider_secrets": [
+    {
+      "name": "AIKEYPOOL_PROVIDER_GROQ_KEYS",
+      "configured": true,
+      "has_value": true
+    }
+  ],
+  "smtp_secrets": [
+    {
+      "name": "SMTP_HOST",
+      "configured": true,
+      "has_value": false,
+      "warning": "SMTP_HOST is set but empty"
+    },
+    {
+      "name": "SMTP_PORT",
+      "configured": true,
+      "has_value": true
+    },
+    {
+      "name": "SMTP_USER",
+      "configured": true,
+      "has_value": false,
+      "warning": "SMTP_USER is set but empty"
+    },
+    {
+      "name": "SMTP_PASSWORD",
+      "configured": true,
+      "has_value": false,
+      "warning": "SMTP_PASSWORD is set but empty"
+    },
+    {
+      "name": "EMAIL_RECIPIENT",
+      "configured": true,
+      "has_value": false,
+      "warning": "EMAIL_RECIPIENT is set but empty"
+    }
+  ],
+  "providers_detected": [
+    "groq"
+  ],
+  "providers_configured": [
+    "groq"
+  ],
+  "warnings": [
+    "SMTP partially configured \u2014 missing: SMTP_HOST, SMTP_USER, SMTP_PASSWORD, EMAIL_RECIPIENT. Email will be skipped."
+  ],
+  "errors": [
+    "AIKEYPOOL_MASTER_KEY is not set \u2014 API will not start"
+  ],
+  "typo_suggestions": []
+}
