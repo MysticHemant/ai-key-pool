@@ -79,7 +79,7 @@ def generate_status_json(
             ],
         }
 
-    # Configuration health
+    # Configuration health — registry is the source of truth for providers_configured
     config_health = {
         "is_valid": True,
         "providers_detected": [],
@@ -91,7 +91,7 @@ def generate_status_json(
         config_health = {
             "is_valid": config_report.is_valid,
             "providers_detected": config_report.providers_detected,
-            "providers_configured": config_report.providers_configured,
+            "providers_configured": sorted(key_manager.registry.get_all_providers()),
             "total_secrets_checked": config_report.total_secrets_checked,
             "total_secrets_ok": config_report.total_secrets_ok,
             "warnings": config_report.warnings,
@@ -242,9 +242,8 @@ def _classify_priority(finding: dict) -> str:
     2. HIGH: Breaking changes (type in "deprecation", "breaking")
     3. MEDIUM: Free-tier improvement (type == "free_tier")
     4. MEDIUM: New model (type == "model")
-    5. MEDIUM: Add key with high confidence (action == "add_key")
-    6. LOW: Pricing changes (type == "pricing")
-    7. LOW: General news / monitor (action == "monitor")
+    5. LOW: Pricing changes (type == "pricing")
+    6. LOW: General news / monitor (action == "monitor")
 
     Args:
         finding: Finding dict
@@ -253,7 +252,6 @@ def _classify_priority(finding: dict) -> str:
         Priority string: "high", "medium", or "low"
     """
     action = finding.get("action", "")
-    confidence = finding.get("confidence", "medium")
     ftype = finding.get("type", "")
 
     if action == "add_provider":
@@ -263,8 +261,6 @@ def _classify_priority(finding: dict) -> str:
     if ftype == "free_tier":
         return "medium"
     if ftype == "model":
-        return "medium"
-    if action == "add_key" and confidence == "high":
         return "medium"
     if ftype == "pricing":
         return "low"
@@ -278,7 +274,7 @@ def _format_action_line(finding: dict) -> str:
 
     Examples:
         "Add GitHub Models provider"
-        "Groq: New model available (Kimi K2)"
+        "Groq: Released Kimi K2"
         "Anthropic: Free tier expanded"
         "Fireworks: Pricing update"
 
@@ -297,17 +293,12 @@ def _format_action_line(finding: dict) -> str:
     if action == "add_provider":
         return f"Add {provider} provider"
 
-    if action == "add_key":
-        if model:
-            return f"Add {provider} key for {model}"
-        return f"Add {provider} key"
+    if ftype == "model":
+        label = model if model else description[:60]
+        return f"{provider.title()}: Released {label}" if model else f"{provider.title()}: {description[:80]}"
 
     if ftype == "free_tier":
         return f"{provider.title()}: Free tier update" + (f" — {description[:60]}" if description else "")
-
-    if ftype == "model":
-        label = model if model else description[:60]
-        return f"{provider.title()}: New model available ({label})" if model else f"{provider.title()}: {description[:80]}"
 
     if ftype in ("deprecation", "breaking"):
         return f"{provider.title()}: {description[:80]}" if description else f"{provider.title()}: Breaking change"

@@ -289,24 +289,43 @@ def _filter_configured_providers(
 ) -> list[dict]:
     """Reclassify recommendations for already-configured providers.
 
-    If a provider is already configured, "add_key" or "add_provider" actions
-    are downgraded to "monitor" (informational). The finding is never removed.
+    Decision tree per finding:
+      - Provider exists  → report updates only (never recommend add_key / add_provider)
+      - Provider missing → recommend adding the provider
+
+    For configured providers:
+      - "add_key" → "update" (informational, e.g. new model released)
+      - "add_provider" → "update" (informational)
+      - "monitor" / "update" / "none" → unchanged
+
+    Models never require keys — model findings always use "update" regardless.
 
     Args:
         findings: LLM-generated findings list
         configured_providers: List of provider names already in the registry
 
     Returns:
-        Modified findings list (same objects, mutated in place)
+        Modified findings list (mutated in place)
     """
     configured_set = set(configured_providers)
     for f in findings:
         provider = f.get("provider", "")
         action = f.get("action", "")
-        if provider in configured_set and action in ("add_key", "add_provider"):
-            f["action"] = "monitor"
-            desc = f.get("description", "")
-            f["description"] = f"{desc} [Already configured — informational only]" if desc else "[Already configured — informational only]"
+        ftype = f.get("type", "")
+
+        if provider in configured_set:
+            # Model findings: never suggest adding a key — models are informational
+            if ftype == "model":
+                f["action"] = "update"
+            # For configured providers, never recommend adding keys or the provider itself
+            elif action in ("add_key", "add_provider"):
+                f["action"] = "update"
+        else:
+            # Provider not configured — recommend adding it (keep add_provider)
+            if ftype == "model" and action == "add_key":
+                # New model on unknown provider → recommend adding the provider
+                f["action"] = "add_provider"
+
     return findings
 
 
@@ -401,8 +420,16 @@ For each finding, determine:
 - description: a concise description
 - url: the source URL
 - type: one of "provider", "model", "free_tier", "pricing", "deprecation", "announcement"
-- action: one of "add_key", "monitor", "update", "none"
+- action: one of "add_provider", "update", "monitor", "none"
 - confidence: "high" if directly from official source, "medium" if inferred, "low" if uncertain
+
+Action rules:
+- "add_provider": ONLY when a provider is completely new and not yet configured
+- "update": new model released, pricing changed, free tier changed, new API feature
+- "monitor": general news or announcements worth tracking
+- "none": not relevant
+
+NEVER use "add_key" — models do not require API keys. A new model release is an "update", not a key action.
 
 Also identify:
 - pricing changes
