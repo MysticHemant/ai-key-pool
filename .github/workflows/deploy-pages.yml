@@ -1,6 +1,9 @@
 name: Deploy to GitHub Pages
 
 on:
+  workflow_run:
+    workflows: ["Daily Maintenance"]
+    types: [completed]
   push:
     branches: ["main", "master"]
   workflow_dispatch:
@@ -9,6 +12,7 @@ permissions:
   contents: read
   pages: write
   id-token: write
+  actions: read
 
 concurrency:
   group: "pages"
@@ -16,12 +20,26 @@ concurrency:
 
 jobs:
   deploy:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     steps:
+      - name: Download dashboard artifact
+        if: github.event_name == 'workflow_run'
+        uses: actions/download-artifact@v4
+        with:
+          name: dashboard-data
+          path: ./dashboard
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Checkout
+        if: github.event_name != 'workflow_run'
         uses: actions/checkout@v4
 
       - name: Setup Pages

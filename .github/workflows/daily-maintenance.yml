@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: daily-maintenance
@@ -19,16 +19,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: main
-          persist-credentials: true
-
-      - name: Update local branch
-        run: |
-          git fetch origin
-          git checkout main
-          git reset --hard origin/main
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -56,24 +46,9 @@ jobs:
         run: |
           python -m src.maintenance.orchestrator
 
-      - name: Commit dashboard updates
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git add dashboard/data
-
-          if git diff --cached --quiet; then
-            echo "No dashboard changes"
-            exit 0
-          fi
-
-          git commit -m "Daily maintenance update [skip ci]"
-
-      - name: Rebase onto latest main
-        run: |
-          git pull --rebase origin main
-
-      - name: Push changes
-        run: |
-          git push origin main
+      - name: Upload dashboard artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-data
+          path: dashboard/
+          retention-days: 7
