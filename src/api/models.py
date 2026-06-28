@@ -37,3 +37,21 @@ class StatusResponse(BaseModel):
     exhausted_keys: int
     disabled_keys: int
     providers: dict
+
+
+class ConfigResponse(BaseModel):
+    """Response body for GET /config."""
+    is_valid: bool
+    providers_detected: list[str]
+    providers_configured: list[str]
+    total_secrets_checked: int
+    total_secrets_ok: int
+    warnings: list[str]
+    errors: list[str]
+    typo_suggestions: list[dict]
+
+
+class ProvidersResponse(BaseModel):
+    """Response body for GET /providers."""
+    providers: list[str]
+    provider_status: dict

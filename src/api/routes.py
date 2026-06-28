@@ -4,11 +4,12 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
 
 from .auth import verify_master_key
-from .models import ChatRequest, ChatResponse, RotateResponse, StatusResponse
+from .models import ChatRequest, ChatResponse, RotateResponse, StatusResponse, ConfigResponse, ProvidersResponse
 from ..providers.base_provider import ChatMessage
-from ..providers.provider_factory import create_provider, list_providers
+from ..providers.provider_factory import create_provider, list_providers, get_provider_status
 from ..key_pool import KeyManager, KeyRotator, RotationResult
 from ..utils.config import Config
+from ..utils.config_validator import validate_config
 from ..utils.logger import get_logger
 
 
@@ -156,4 +157,33 @@ async def status(_: str = Depends(verify_master_key)):
         exhausted_keys=registry["by_status"].get("exhausted", 0),
         disabled_keys=registry["by_status"].get("disabled", 0),
         providers=providers,
+    )
+
+
+@router.get("/config")
+async def config_health(_: str = Depends(verify_master_key)):
+    """Get configuration health report.
+
+    Never exposes secret values. Only shows health status,
+    detected providers, and warnings about misconfiguration.
+    """
+    report = validate_config(_config.data_dir)
+    return ConfigResponse(
+        is_valid=report.is_valid,
+        providers_detected=report.providers_detected,
+        providers_configured=report.providers_configured,
+        total_secrets_checked=report.total_secrets_checked,
+        total_secrets_ok=report.total_secrets_ok,
+        warnings=report.warnings,
+        errors=report.errors,
+        typo_suggestions=report.typo_suggestions,
+    )
+
+
+@router.get("/providers")
+async def providers_list(_: str = Depends(verify_master_key)):
+    """List all available providers and their adapter status."""
+    return ProvidersResponse(
+        providers=list_providers(),
+        provider_status=get_provider_status(),
     )

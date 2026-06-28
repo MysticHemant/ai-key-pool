@@ -8,6 +8,7 @@ from .auth import set_master_key
 from .routes import init_routes, router
 from ..key_pool import KeyManager, KeyRotator
 from ..utils.config import load_config
+from ..utils.config_validator import validate_config
 from ..utils.logger import get_logger
 
 logger = get_logger("app")
@@ -17,6 +18,15 @@ logger = get_logger("app")
 async def lifespan(app: FastAPI):
     """Initialize services on startup."""
     config = load_config()
+
+    # Validate configuration and secrets
+    report = validate_config(config.data_dir)
+    if report.warnings:
+        for w in report.warnings:
+            logger.warning("CONFIG: %s", w)
+    if report.errors:
+        for e in report.errors:
+            logger.error("CONFIG: %s", e)
 
     # Fail fast if the service is not configured correctly.
     if not config.master_key:
@@ -40,9 +50,10 @@ async def lifespan(app: FastAPI):
     init_routes(key_manager, key_rotator, config)
 
     logger.info(
-        "AI Key Pool started — provider=%s, keys=%d",
+        "AI Key Pool started — provider=%s, keys=%d, providers_detected=%s",
         config.active_provider,
         len(key_manager.registry.keys),
+        report.providers_detected,
     )
 
     yield

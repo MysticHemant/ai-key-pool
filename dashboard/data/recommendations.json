@@ -1,9 +1,47 @@
 {
   "research_date": "2026-06-28",
-  "new_providers": [],
-  "free_tiers": [],
-  "new_models": [],
-  "provider_changes": [],
-  "recommendations": [],
-  "summary": "Research failed: No healthy keys available for provider: groq"
+  "findings": [
+    {
+      "provider": "",
+      "model": null,
+      "description": "New provider",
+      "url": "",
+      "type": "provider",
+      "action": "add_key",
+      "confidence": "medium",
+      "priority": "medium"
+    },
+    {
+      "provider": "",
+      "model": null,
+      "description": "New model",
+      "url": "",
+      "type": "model",
+      "action": "monitor",
+      "confidence": "medium",
+      "priority": "low"
+    }
+  ],
+  "new_providers": [
+    "TestProvider"
+  ],
+  "new_models": [
+    "gpt-5"
+  ],
+  "pricing_changes": [],
+  "free_tier_changes": [],
+  "breaking_changes": [],
+  "recommendations": [
+    {
+      "priority": "high",
+      "action": "New provider",
+      "reason": "TestProvider"
+    },
+    {
+      "priority": "medium",
+      "action": "New model",
+      "reason": "gpt-5"
+    }
+  ],
+  "summary": "Test research"
 }
