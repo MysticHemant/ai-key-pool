@@ -10,12 +10,22 @@
   "exhausted_keys": 0,
   "disabled_keys": 0,
   "by_provider": {
-    "openai": 1,
-    "groq": 1
+    "openai": {
+      "total": 1,
+      "active": 1,
+      "exhausted": 0,
+      "disabled": 0
+    },
+    "groq": {
+      "total": 1,
+      "active": 1,
+      "exhausted": 0,
+      "disabled": 0
+    }
   },
   "last_success": null,
   "last_failure": null,
-  "last_update": "2026-06-28T11:13:38.785244+00:00",
+  "last_update": "2026-06-28T11:32:16.468665+00:00",
   "maintenance_duration_seconds": 0.0,
   "maintenance_status": "unknown",
   "providers": {
@@ -23,6 +33,8 @@
       "provider": "openai",
       "total_keys": 1,
       "healthy_keys": 1,
+      "exhausted_keys": 0,
+      "disabled_keys": 0,
       "keys": [
         {
           "key_id": "test-key-1",
@@ -36,6 +48,8 @@
       "provider": "groq",
       "total_keys": 1,
       "healthy_keys": 1,
+      "exhausted_keys": 0,
+      "disabled_keys": 0,
       "keys": [
         {
           "key_id": "test-key-2",

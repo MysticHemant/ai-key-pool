@@ -338,11 +338,11 @@ def _do_send_email(
         "disabled_keys": stats["registry"]["by_status"].get("disabled", 0),
         "providers": {},
     }
-    # Add provider summaries to status
-    for pname in stats["registry"].get("by_provider", {}):
+    # Per-provider summaries from the same registry stats (single source of truth)
+    for pname, pdata in stats["registry"].get("by_provider", {}).items():
         status_data["providers"][pname] = {
-            "total_keys": stats["registry"]["by_provider"][pname],
-            "healthy_keys": 0,
+            "total_keys": pdata["total"],
+            "healthy_keys": pdata["active"],
         }
 
     try:

@@ -60,8 +60,24 @@ def generate_status_json(
                 last_failure = entry.last_used
 
     providers = {}
-    for provider_name in key_manager.registry.get_all_providers():
-        providers[provider_name] = key_manager.get_provider_summary(provider_name)
+    for provider_name, pdata in registry.get("by_provider", {}).items():
+        providers[provider_name] = {
+            "provider": provider_name,
+            "total_keys": pdata["total"],
+            "healthy_keys": pdata["active"],
+            "exhausted_keys": pdata["exhausted"],
+            "disabled_keys": pdata["disabled"],
+            "keys": [
+                {
+                    "key_id": k.key_id,
+                    "status": k.status.value,
+                    "failure_count": k.failure_count,
+                    "success_count": k.success_count,
+                }
+                for k in key_manager.registry.keys.values()
+                if k.provider == provider_name
+            ],
+        }
 
     # Configuration health
     config_health = {
@@ -133,7 +149,8 @@ def generate_recommendations_json(
 ) -> None:
     """Write recommendations.json for the dashboard.
 
-    Includes: findings with URLs, publication dates, priority, confidence.
+    Produces an action-oriented report grouped by priority level.
+    Only includes findings that have a concrete action or are breaking changes.
 
     Args:
         research_data: Research findings from daily research
@@ -141,8 +158,10 @@ def generate_recommendations_json(
     """
     findings = research_data.get("findings", [])
 
+    # Enrich and classify each finding
     enriched_findings = []
     for f in findings:
+        priority = _classify_priority(f)
         enriched_findings.append({
             "provider": f.get("provider", ""),
             "model": f.get("model"),
@@ -151,8 +170,27 @@ def generate_recommendations_json(
             "type": f.get("type", ""),
             "action": f.get("action", "none"),
             "confidence": f.get("confidence", "medium"),
-            "priority": _classify_priority(f),
+            "priority": priority,
         })
+
+    # Build concise action-oriented recommendations
+    # Only include findings with actionable priority (exclude low-confidence noise)
+    action_items = []
+    for f in enriched_findings:
+        priority = f["priority"]
+        # Skip low-priority findings that are just general announcements
+        if priority == "low" and f["action"] == "monitor" and f["confidence"] != "high":
+            continue
+        action_items.append({
+            "priority": priority,
+            "action": _format_action_line(f),
+            "provider": f["provider"],
+            "type": f["type"],
+        })
+
+    # Sort by priority: high first, then medium, then low
+    priority_order = {"high": 0, "medium": 1, "low": 2}
+    action_items.sort(key=lambda x: priority_order.get(x["priority"], 3))
 
     # Derive lists from findings if not explicitly provided (backward compat)
     new_providers = research_data.get("new_providers") or [
@@ -179,19 +217,12 @@ def generate_recommendations_json(
     recommendations = {
         "research_date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
         "findings": enriched_findings,
+        "recommendations": action_items,
         "new_providers": new_providers,
         "new_models": new_models,
         "pricing_changes": pricing_changes,
         "free_tier_changes": free_tier_changes,
         "breaking_changes": breaking_changes,
-        "recommendations": [
-            {
-                "priority": "high" if f.get("action") == "add_key" else "medium",
-                "action": f.get("description", "No action"),
-                "reason": f.get("provider", f.get("name", "")),
-            }
-            for f in findings if f.get("action") in ("add_key", "monitor")
-        ],
         "summary": research_data.get("summary", "No research data"),
     }
 
@@ -199,11 +230,21 @@ def generate_recommendations_json(
     with open(output_path / "recommendations.json", "w") as f:
         json.dump(recommendations, f, indent=2)
 
-    logger.info("Generated recommendations.json — %d findings", len(findings))
+    logger.info("Generated recommendations.json — %d findings, %d action items",
+                len(findings), len(action_items))
 
 
 def _classify_priority(finding: dict) -> str:
     """Classify a finding's priority level.
+
+    Priority order:
+    1. HIGH: New provider not configured (action == "add_provider")
+    2. HIGH: Breaking changes (type in "deprecation", "breaking")
+    3. MEDIUM: Free-tier improvement (type == "free_tier")
+    4. MEDIUM: New model (type == "model")
+    5. MEDIUM: Add key with high confidence (action == "add_key")
+    6. LOW: Pricing changes (type == "pricing")
+    7. LOW: General news / monitor (action == "monitor")
 
     Args:
         finding: Finding dict
@@ -215,12 +256,63 @@ def _classify_priority(finding: dict) -> str:
     confidence = finding.get("confidence", "medium")
     ftype = finding.get("type", "")
 
-    if action == "add_key" and confidence == "high":
+    if action == "add_provider":
         return "high"
     if ftype in ("deprecation", "breaking"):
         return "high"
-    if action == "add_key":
+    if ftype == "free_tier":
         return "medium"
+    if ftype == "model":
+        return "medium"
+    if action == "add_key" and confidence == "high":
+        return "medium"
+    if ftype == "pricing":
+        return "low"
     if action == "monitor":
         return "low"
-    return "medium"
+    return "low"
+
+
+def _format_action_line(finding: dict) -> str:
+    """Format a concise action line for the recommendations list.
+
+    Examples:
+        "Add GitHub Models provider"
+        "Groq: New model available (Kimi K2)"
+        "Anthropic: Free tier expanded"
+        "Fireworks: Pricing update"
+
+    Args:
+        finding: Enriched finding dict
+
+    Returns:
+        One-line action description
+    """
+    provider = finding.get("provider", "Unknown")
+    action = finding.get("action", "")
+    ftype = finding.get("type", "")
+    model = finding.get("model")
+    description = finding.get("description", "")
+
+    if action == "add_provider":
+        return f"Add {provider} provider"
+
+    if action == "add_key":
+        if model:
+            return f"Add {provider} key for {model}"
+        return f"Add {provider} key"
+
+    if ftype == "free_tier":
+        return f"{provider.title()}: Free tier update" + (f" — {description[:60]}" if description else "")
+
+    if ftype == "model":
+        label = model if model else description[:60]
+        return f"{provider.title()}: New model available ({label})" if model else f"{provider.title()}: {description[:80]}"
+
+    if ftype in ("deprecation", "breaking"):
+        return f"{provider.title()}: {description[:80]}" if description else f"{provider.title()}: Breaking change"
+
+    if ftype == "pricing":
+        return f"{provider.title()}: Pricing update" + (f" — {description[:50]}" if description else "")
+
+    return f"{provider.title()}: {description[:80]}" if description else f"{provider.title()} announcement"

@@ -72,8 +72,10 @@ def test_basic_operations():
     # Verify registration
     stats = manager.get_all_stats()
     assert stats["registry"]["total_keys"] == 5, f"Expected 5 keys, got {stats['registry']['total_keys']}"
-    assert stats["registry"]["by_provider"]["openai"] == 3
-    assert stats["registry"]["by_provider"]["anthropic"] == 2
+    assert stats["registry"]["by_provider"]["openai"]["total"] == 3
+    assert stats["registry"]["by_provider"]["anthropic"]["total"] == 2
+    assert stats["registry"]["by_provider"]["openai"]["active"] == 3
+    assert stats["registry"]["by_provider"]["anthropic"]["active"] == 2
 
     # Get active key
     key = manager.get_active_key("openai")

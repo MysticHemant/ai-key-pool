@@ -277,6 +277,103 @@ def deduplicate_findings(findings: list[dict]) -> list[dict]:
     return unique
 
 
+# ─── Recommendation filtering ────────────────────────────────────────────────
+
+
+_CONFIDENCE_RANK = {"high": 3, "medium": 2, "low": 1}
+
+
+def _filter_configured_providers(
+    findings: list[dict],
+    configured_providers: list[str],
+) -> list[dict]:
+    """Reclassify recommendations for already-configured providers.
+
+    If a provider is already configured, "add_key" or "add_provider" actions
+    are downgraded to "monitor" (informational). The finding is never removed.
+
+    Args:
+        findings: LLM-generated findings list
+        configured_providers: List of provider names already in the registry
+
+    Returns:
+        Modified findings list (same objects, mutated in place)
+    """
+    configured_set = set(configured_providers)
+    for f in findings:
+        provider = f.get("provider", "")
+        action = f.get("action", "")
+        if provider in configured_set and action in ("add_key", "add_provider"):
+            f["action"] = "monitor"
+            desc = f.get("description", "")
+            f["description"] = f"{desc} [Already configured — informational only]" if desc else "[Already configured — informational only]"
+    return findings
+
+
+def _deduplicate_by_provider_title(findings: list[dict]) -> list[dict]:
+    """Deduplicate findings by provider and normalized title.
+
+    When duplicates exist, keep the highest-confidence version.
+    If tied, prefer the one with a URL.
+
+    Args:
+        findings: List of findings dicts
+
+    Returns:
+        Deduplicated list
+    """
+    best: dict[tuple[str, str], dict] = {}
+    for f in findings:
+        provider = f.get("provider", "").lower().strip()
+        title = f.get("description", f.get("model", "")).lower().strip()[:120]
+        key = (provider, title)
+        if key not in best:
+            best[key] = f
+        else:
+            existing = best[key]
+            existing_rank = _CONFIDENCE_RANK.get(existing.get("confidence", "medium"), 0)
+            new_rank = _CONFIDENCE_RANK.get(f.get("confidence", "medium"), 0)
+            if new_rank > existing_rank:
+                best[key] = f
+            elif new_rank == existing_rank and not existing.get("url") and f.get("url"):
+                best[key] = f
+    return list(best.values())
+
+
+def _prioritize_findings(findings: list[dict]) -> list[dict]:
+    """Sort findings by actionability priority.
+
+    Priority order:
+    1. New provider not configured (action == "add_provider")
+    2. Existing provider free-tier improvement (type == "free_tier")
+    3. Existing provider new models (type == "model")
+    4. Breaking changes (type in "deprecation", "breaking")
+    5. Pricing changes (type == "pricing")
+    6. General news (everything else)
+
+    Args:
+        findings: List of findings dicts
+
+    Returns:
+        Sorted list (highest priority first)
+    """
+    def _sort_key(f: dict) -> int:
+        action = f.get("action", "")
+        ftype = f.get("type", "")
+        if action == "add_provider":
+            return 0
+        if ftype == "free_tier":
+            return 1
+        if ftype == "model":
+            return 2
+        if ftype in ("deprecation", "breaking"):
+            return 3
+        if ftype == "pricing":
+            return 4
+        return 5
+    return sorted(findings, key=_sort_key)
+
+
 def collect_all_sources() -> list[dict]:
     """Collect and deduplicate from all sources.
 
@@ -546,6 +643,19 @@ def research_providers(
             "Check network connectivity and source availability."
         )
         findings_result["_success"] = False
+
+    # Step 3b: Filter, deduplicate, prioritize findings
+    configured_providers = key_manager.registry.get_all_providers()
+    findings_list = findings_result.get("findings", [])
+    if findings_list:
+        findings_list = _filter_configured_providers(findings_list, configured_providers)
+        findings_list = _deduplicate_by_provider_title(findings_list)
+        findings_list = _prioritize_findings(findings_list)
+        findings_result["findings"] = findings_list
+        logger.info(
+            "RESEARCH FILTER: %d findings after filter/dedup/prioritize (configured=%s)",
+            len(findings_list), configured_providers,
+        )
 
     # Step 4: Merge with history
     history = _load_history(history_path)

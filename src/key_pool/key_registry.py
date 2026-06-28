@@ -226,8 +226,20 @@ class KeyRegistry:
     def get_stats(self) -> dict:
         """Get registry statistics.
 
+        Single source of truth for key health. Both the overall summary
+        and per-provider summaries must be derived from this result
+        so they always match.
+
         Returns:
-            Dictionary with registry stats
+            Dictionary with registry stats:
+            {
+                "total_keys": int,
+                "by_status": {"active": N, "exhausted": N, "disabled": N},
+                "by_provider": {
+                    "openai": {"total": 3, "active": 2, "exhausted": 1, "disabled": 0},
+                    ...
+                }
+            }
         """
         total = len(self.keys)
         by_status = {}
@@ -238,8 +250,12 @@ class KeyRegistry:
             status = entry.status.value
             by_status[status] = by_status.get(status, 0) + 1
 
-            # Count by provider
-            by_provider[entry.provider] = by_provider.get(entry.provider, 0) + 1
+            # Count by provider with status breakdown
+            provider = entry.provider
+            if provider not in by_provider:
+                by_provider[provider] = {"total": 0, "active": 0, "exhausted": 0, "disabled": 0}
+            by_provider[provider]["total"] += 1
+            by_provider[provider][status] += 1
 
         return {
             "total_keys": total,

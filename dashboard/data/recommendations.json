@@ -9,7 +9,7 @@
       "type": "provider",
       "action": "add_key",
       "confidence": "medium",
-      "priority": "medium"
+      "priority": "low"
     },
     {
       "provider": "",
@@ -19,7 +19,21 @@
       "type": "model",
       "action": "monitor",
       "confidence": "medium",
-      "priority": "low"
+      "priority": "medium"
+    }
+  ],
+  "recommendations": [
+    {
+      "priority": "medium",
+      "action": ": New model",
+      "provider": "",
+      "type": "model"
+    },
+    {
+      "priority": "low",
+      "action": "Add  key",
+      "provider": "",
+      "type": "provider"
     }
   ],
   "new_providers": [
@@ -31,17 +45,5 @@
   "pricing_changes": [],
   "free_tier_changes": [],
   "breaking_changes": [],
-  "recommendations": [
-    {
-      "priority": "high",
-      "action": "New provider",
-      "reason": "TestProvider"
-    },
-    {
-      "priority": "medium",
-      "action": "New model",
-      "reason": "gpt-5"
-    }
-  ],
   "summary": "Test research"
 }
