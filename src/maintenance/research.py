@@ -397,8 +397,12 @@ def _llm_summarize(
         ChatMessage(role="user", content=f"{RESEARCH_PROMPT}\n\n{user_prompt}"),
     ]
 
+    # Use the provider's own default model — never hardcode OpenAI model names
+    model = provider.get_default_model()
+    logger.info("RESEARCH: Using provider=%s model=%s", provider_name, model)
+
     def request_fn(api_key: str):
-        return provider.chat(api_key, "gpt-4o-mini", messages)
+        return provider.chat(api_key, model, messages)
 
     result = rotator.execute_with_rotation(provider_name, request_fn)
 

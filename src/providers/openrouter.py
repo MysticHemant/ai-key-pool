@@ -2,8 +2,10 @@
 
 Uses OpenRouter API key for authentication.
 Endpoint: https://openrouter.ai/api/v1/chat/completions
+Default model: configurable via AIKEYPOOL_PROVIDER_OPENROUTER_MODEL env var
 """
 
+import os
 from typing import Optional
 from .base_provider import BaseProvider
 
@@ -31,3 +33,6 @@ class OpenRouterProvider(BaseProvider):
         if self.site_name:
             headers["X-OpenRouter-Title"] = self.site_name
         return headers
+
+    def get_default_model(self) -> str:
+        return os.environ.get("AIKEYPOOL_PROVIDER_OPENROUTER_MODEL", "openrouter/horizon-beta")

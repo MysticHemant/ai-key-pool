@@ -3,8 +3,14 @@
 Uses generic SMTP with detailed stage-by-stage logging.
 All credentials from environment variables — never hardcoded.
 Never exposes passwords in logs or email content.
+
+Supports two TLS modes:
+  - Port 465: SMTP_SSL (implicit TLS) — connection is encrypted from start
+  - Port 587: SMTP + STARTTLS (explicit TLS) — upgrade plain connection
+  - Override with SMTP_TLS=ssl or SMTP_TLS=starttls
 """
 
+import os
 import smtplib
 import time
 from email.mime.text import MIMEText
@@ -101,11 +107,32 @@ def send_daily_summary(
 
     start_time = time.monotonic()
 
-    # ── Stage 2: SMTP connection ──
+    # ── Stage 2: Determine connection mode ──
+    # Port 465 = implicit SSL/TLS (SMTP_SSL)
+    # Port 587 = explicit TLS (SMTP + STARTTLS)
+    # SMTP_TLS env var can override: "ssl" for SMTP_SSL, "starttls" for STARTTLS
+    tls_mode = os.environ.get("SMTP_TLS", "").lower()
+    if tls_mode == "ssl":
+        use_ssl = True
+    elif tls_mode == "starttls":
+        use_ssl = False
+    else:
+        # Auto-detect from port
+        use_ssl = (smtp_port == 465)
+
+    if use_ssl:
+        logger.info("EMAIL STAGE: Connection mode=SMTP_SSL (port %d, implicit TLS)", smtp_port)
+    else:
+        logger.info("EMAIL STAGE: Connection mode=SMTP+STARTTLS (port %d, explicit TLS)", smtp_port)
+
+    # ── Stage 3: SMTP connection ──
     logger.info("EMAIL STAGE: Connecting to %s:%d (timeout=30s)", smtp_host, smtp_port)
     server = None
     try:
-        server = smtplib.SMTP(smtp_host, smtp_port, timeout=30)
+        if use_ssl:
+            server = smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=30)
+        else:
+            server = smtplib.SMTP(smtp_host, smtp_port, timeout=30)
         logger.info("EMAIL STAGE: Connected to %s:%d", smtp_host, smtp_port)
     except smtplib.SMTPConnectError as e:
         logger.error("EMAIL STAGE FAIL: SMTPConnectError at connection — %s", e)
@@ -123,29 +150,32 @@ def send_daily_summary(
         logger.error("EMAIL STAGE FAIL: Unexpected error at connection — %s: %s", type(e).__name__, e)
         raise EmailDeliveryError("connection", f"Connection failed: {type(e).__name__}: {e}")
 
-    # ── Stage 3: TLS ──
-    logger.info("EMAIL STAGE: Starting TLS with %s:%d", smtp_host, smtp_port)
-    try:
-        server.starttls()
-        logger.info("EMAIL STAGE: TLS established with %s:%d", smtp_host, smtp_port)
-    except smtplib.SMTPException as e:
-        logger.error("EMAIL STAGE FAIL: SMTPException at TLS — %s: %s", type(e).__name__, e)
-        _safe_quit(server)
-        raise EmailDeliveryError("tls", f"TLS negotiation failed: {type(e).__name__}: {e}")
-    except ConnectionResetError as e:
-        logger.error("EMAIL STAGE FAIL: ConnectionResetError at TLS — %s", e)
-        _safe_quit(server)
-        raise EmailDeliveryError("tls", f"Connection reset during TLS: {type(e).__name__}: {e}")
-    except BrokenPipeError as e:
-        logger.error("EMAIL STAGE FAIL: BrokenPipeError at TLS — %s", e)
-        _safe_quit(server)
-        raise EmailDeliveryError("tls", f"Broken pipe during TLS: {type(e).__name__}: {e}")
-    except OSError as e:
-        logger.error("EMAIL STAGE FAIL: OSError at TLS — %s: %s", type(e).__name__, e)
-        _safe_quit(server)
-        raise EmailDeliveryError("tls", f"Network error during TLS: {type(e).__name__}: {e}")
+    # ── Stage 4: TLS (STARTTLS only — SMTP_SSL is already encrypted) ──
+    if use_ssl:
+        logger.info("EMAIL STAGE: TLS already active (SMTP_SSL mode)")
+    else:
+        logger.info("EMAIL STAGE: Starting STARTTLS with %s:%d", smtp_host, smtp_port)
+        try:
+            server.starttls()
+            logger.info("EMAIL STAGE: STARTTLS established with %s:%d", smtp_host, smtp_port)
+        except smtplib.SMTPException as e:
+            logger.error("EMAIL STAGE FAIL: SMTPException at STARTTLS — %s: %s", type(e).__name__, e)
+            _safe_quit(server)
+            raise EmailDeliveryError("tls", f"STARTTLS negotiation failed: {type(e).__name__}: {e}")
+        except ConnectionResetError as e:
+            logger.error("EMAIL STAGE FAIL: ConnectionResetError at STARTTLS — %s", e)
+            _safe_quit(server)
+            raise EmailDeliveryError("tls", f"Connection reset during STARTTLS: {type(e).__name__}: {e}")
+        except BrokenPipeError as e:
+            logger.error("EMAIL STAGE FAIL: BrokenPipeError at STARTTLS — %s", e)
+            _safe_quit(server)
+            raise EmailDeliveryError("tls", f"Broken pipe during STARTTLS: {type(e).__name__}: {e}")
+        except OSError as e:
+            logger.error("EMAIL STAGE FAIL: OSError at STARTTLS — %s: %s", type(e).__name__, e)
+            _safe_quit(server)
+            raise EmailDeliveryError("tls", f"Network error during STARTTLS: {type(e).__name__}: {e}")
 
-    # ── Stage 4: Authentication ──
+    # ── Stage 5: Authentication ──
     logger.info("EMAIL STAGE: Authenticating as %s", smtp_user)
     try:
         server.login(smtp_user, smtp_password)
@@ -171,7 +201,7 @@ def send_daily_summary(
         _safe_quit(server)
         raise EmailDeliveryError("auth", f"Network error during auth: {type(e).__name__}: {e}")
 
-    # ── Stage 5: Send ──
+    # ── Stage 6: Send ──
     logger.info("EMAIL STAGE: Sending to %s from %s", recipient, smtp_user)
     try:
         server.sendmail(smtp_user, [recipient], msg.as_string())
@@ -209,8 +239,8 @@ def send_daily_summary(
         raise EmailDeliveryError("send", f"Network error during send: {type(e).__name__}: {e}")
 
 
-def _safe_quit(server: smtplib.SMTP) -> None:
-    """Quit SMTP connection safely."""
+def _safe_quit(server) -> None:
+    """Quit SMTP connection safely. Works for both SMTP and SMTP_SSL."""
     try:
         server.quit()
     except Exception:

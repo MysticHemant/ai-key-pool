@@ -98,6 +98,9 @@ def _make_generic_provider_class(provider_name: str) -> type[BaseProvider]:
                 "Content-Type": "application/json",
             }
 
+        def get_default_model(self) -> str:
+            return default_model
+
     _GenericProvider.__name__ = f"Generic_{provider_name}"
     _GenericProvider.__qualname__ = f"Generic_{provider_name}"
 

@@ -2,6 +2,7 @@
 
 Uses GitHub PAT for authentication.
 Endpoint: https://models.github.ai/inference/chat/completions
+Default model: gpt-4.1-mini
 """
 
 from .base_provider import BaseProvider
@@ -23,3 +24,6 @@ class GitHubModelsProvider(BaseProvider):
             "X-GitHub-Api-Version": "2026-03-10",
             "Content-Type": "application/json",
         }
+
+    def get_default_model(self) -> str:
+        return "gpt-4.1-mini"

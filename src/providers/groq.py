@@ -2,6 +2,7 @@
 
 Uses Groq API key for authentication.
 Endpoint: https://api.groq.com/openai/v1/chat/completions
+Default model: llama-3.3-70b-versatile
 """
 
 from .base_provider import BaseProvider
@@ -21,3 +22,6 @@ class GroqProvider(BaseProvider):
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
+
+    def get_default_model(self) -> str:
+        return "llama-3.3-70b-versatile"

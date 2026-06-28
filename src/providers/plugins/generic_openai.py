@@ -86,3 +86,6 @@ class GenericOpenAIProvider(BaseProvider):
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
+
+    def get_default_model(self) -> str:
+        return self._default_model

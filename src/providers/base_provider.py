@@ -42,8 +42,8 @@ class BaseProvider(ABC):
     """Abstract base for all AI provider adapters.
 
     Subclasses must implement get_provider_name(), get_endpoint(),
-    and get_auth_headers(). The chat() and health_check() methods
-    are concrete and use these abstract methods.
+    get_auth_headers(), and get_default_model(). The chat() and
+    health_check() methods are concrete and use these abstract methods.
     """
 
     @abstractmethod
@@ -60,6 +60,14 @@ class BaseProvider(ABC):
 
         Args:
             api_key: The provider API key
+        """
+
+    @abstractmethod
+    def get_default_model(self) -> str:
+        """Return the default model identifier for this provider.
+
+        Each provider returns its own supported default model.
+        Research and health checks use this model unless overridden.
         """
 
     def chat(self, api_key: str, model: str, messages: list[ChatMessage]) -> ChatResponse:
@@ -131,7 +139,7 @@ class BaseProvider(ABC):
         Returns:
             True if the key is valid, False otherwise.
         """
-        check_model = model or "gpt-4o-mini"
+        check_model = model or self.get_default_model()
         try:
             self.chat(api_key, check_model, [ChatMessage(role="user", content="hi")])
             return True
