@@ -1,5 +1,5 @@
 """FastAPI application factory for AI Key Pool."""
-
+from ..startup import sync_provider_keys
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -34,6 +34,7 @@ async def lifespan(app: FastAPI):
         config.data_dir,
         config.max_consecutive_failures,
     )
+    sync_provider_keys(config, key_manager.registry)
     key_rotator = KeyRotator(config, key_manager)
 
     init_routes(key_manager, key_rotator, config)
