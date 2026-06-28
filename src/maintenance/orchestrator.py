@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from ..key_pool import KeyManager, KeyRotator
 from ..utils.config import load_config, Config
 from ..utils.logger import get_logger
+from ..startup import sync_provider_keys
 from .research import research_providers
 from .dashboard_gen import generate_status_json, generate_recommendations_json
 from .email_sender import send_daily_summary
@@ -33,7 +34,13 @@ def run_daily_maintenance() -> dict:
         Summary dict with results of each step
     """
     config = load_config()
-    key_manager = KeyManager(config.data_dir, config.max_consecutive_failures)
+    key_manager = KeyManager(
+        config.data_dir,
+        config.max_consecutive_failures,
+    )
+
+    # Import provider keys into the registry before any maintenance work.
+    sync_provider_keys(config, key_manager.registry)
 
     errors = []
     stats = {"registry": {"total_keys": 0, "by_status": {}}, "health": {}}
