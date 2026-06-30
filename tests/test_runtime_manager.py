@@ -20,7 +20,10 @@ def test_runtime_manager_state_load_save():
     print("  - Running test_runtime_manager_state_load_save...")
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
-        manager = RuntimeManager(tmp_path, max_iterations=5)
+        
+        # Test config
+        config = Config(research_max_iterations=5)
+        manager = RuntimeManager(tmp_path, config=config)
 
         # Verify initial state structure
         state = manager.state
@@ -29,15 +32,23 @@ def test_runtime_manager_state_load_save():
         assert state["status"] == "researching"
         assert state["quality_score"] == 0
         assert len(state["cycle_id"]) > 0
+        
+        # Verify new state variables exist
+        assert "verified_claims" in state
+        assert "unverified_claims" in state
+        assert "long_term_memory" in state
+        assert "current_plan" in state
 
         # Modify state and save
         manager.state["quality_score"] = 80
+        manager.state["quality_metrics"]["overall_quality"] = 80
         manager.state["assumptions"] = ["Test assumption"]
         manager.save_state()
 
         # Reload state in a new manager instance
-        manager2 = RuntimeManager(tmp_path, max_iterations=5)
+        manager2 = RuntimeManager(tmp_path, config=config)
         assert manager2.state["quality_score"] == 80
+        assert manager2.state["quality_metrics"]["overall_quality"] == 80
         assert manager2.state["assumptions"] == ["Test assumption"]
         assert manager2.state["cycle_id"] == state["cycle_id"]
 
@@ -45,26 +56,49 @@ def test_runtime_manager_state_load_save():
         manager2.reset_state()
         assert manager2.state["iteration"] == 1
         assert manager2.state["quality_score"] == 0
+        assert manager2.state["quality_metrics"]["overall_quality"] == 0
         assert manager2.state["cycle_id"] != state["cycle_id"]
     print("    PASSED")
 
 
 def test_runtime_manager_gating():
-    """Test the should_send_email condition gating."""
+    """Test the should_send_email condition gating using structured metrics."""
     print("  - Running test_runtime_manager_gating...")
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
-        manager = RuntimeManager(tmp_path, max_iterations=4)
+        config = Config(
+            research_max_iterations=4,
+            research_quality_threshold=90,
+            min_verification_score=80,
+            min_source_diversity=70
+        )
+        manager = RuntimeManager(tmp_path, config=config)
 
         # 1. Quality < 90, Iteration < max_iterations -> No email
         assert not manager.should_send_email()
 
-        # 2. Quality >= 90 -> Email
-        manager.state["quality_score"] = 92
+        # 2. Overall Quality >= 90 but verification < min -> No email
+        manager.state["quality_metrics"] = {
+            "overall_quality": 95,
+            "verification": 50,
+            "source_diversity": 80
+        }
+        assert not manager.should_send_email()
+
+        # 3. Overall Quality >= 90, verification >= min, diversity >= min -> Email
+        manager.state["quality_metrics"] = {
+            "overall_quality": 95,
+            "verification": 85,
+            "source_diversity": 75
+        }
         assert manager.should_send_email()
 
-        # 3. Quality < 90, Iteration >= max_iterations -> Email
-        manager.state["quality_score"] = 50
+        # 4. Iteration >= max -> Email
+        manager.state["quality_metrics"] = {
+            "overall_quality": 50,
+            "verification": 20,
+            "source_diversity": 20
+        }
         manager.state["iteration"] = 4
         assert manager.should_send_email()
     print("    PASSED")
@@ -75,7 +109,8 @@ def test_runtime_manager_archiving():
     print("  - Running test_runtime_manager_archiving...")
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
-        manager = RuntimeManager(tmp_path, max_iterations=5)
+        config = Config(research_max_iterations=5)
+        manager = RuntimeManager(tmp_path, config=config)
         cycle_id = manager.state["cycle_id"]
 
         # Create dummy iteration files
@@ -86,8 +121,12 @@ def test_runtime_manager_archiving():
         iter2 = research_dir / "iteration_2.md"
         iter2.write_text("Iteration 2 content", encoding="utf-8")
 
-        # Update state
-        manager.update_state({"quality_score": 95}, [])
+        # Update state with high quality metrics to trigger completed status
+        manager.update_state({
+            "overall_quality": 95,
+            "verification": 85,
+            "source_diversity": 85
+        }, [])
 
         # Archive
         manager.archive_cycle()
@@ -131,42 +170,59 @@ def test_orchestrator_integration():
             "findings": [],
             "summary": "Low quality summary",
             "iteration_report": {"summary": "Low summary", "evidence": "None"},
-            "evaluation": {"quality_score": 75, "coverage_score": 60, "confidence_score": 70}
+            "evaluation": {
+                "overall_quality": 75,
+                "coverage": 60,
+                "verification": 50,
+                "source_diversity": 50,
+                "novel_information": 10,
+                "contradictions_resolved": 0
+            }
         }
 
         with patch.dict("os.environ", env):
             # Run 1: Should perform research, save iteration 1, update state, skip email, increment to iteration 2
             with patch("src.maintenance.orchestrator.research_providers", return_value=mock_low_quality):
-                with patch("src.maintenance.orchestrator._do_send_email") as mock_send:
-                    result = run_daily_maintenance()
-                    assert result["steps"]["research"]["status"] == "ok"
-                    assert result["steps"]["email"]["status"] == "skipped"
-                    mock_send.assert_not_called()
+                with patch("src.maintenance.orchestrator.generate_research_plan", return_value={"objectives": ["Test"]}):
+                    with patch("src.maintenance.orchestrator.compress_memory", return_value="compressed memory"):
+                        with patch("src.maintenance.orchestrator._do_send_email") as mock_send:
+                            result = run_daily_maintenance()
+                            assert result["steps"]["research"]["status"] == "ok"
+                            assert result["steps"]["email"]["status"] == "skipped"
+                            mock_send.assert_not_called()
 
             # Verify iteration file saved & iteration incremented to 2
             assert (tmp_path / "research" / "iteration_1.md").exists()
             with open(tmp_path / "research_runtime.json") as f:
                 state = json.load(f)
             assert state["iteration"] == 2
-            assert state["quality_score"] == 75
+            assert state["quality_metrics"]["overall_quality"] == 75
 
             # Mock LLM response that hits quality target
             mock_high_quality = {
                 "findings": [{"provider": "groq", "type": "model", "action": "update"}],
                 "summary": "High quality summary",
                 "iteration_report": {"summary": "High summary", "evidence": "Got it"},
-                "evaluation": {"quality_score": 95, "coverage_score": 90, "confidence_score": 90}
+                "evaluation": {
+                    "overall_quality": 95,
+                    "coverage": 90,
+                    "verification": 90,
+                    "source_diversity": 90,
+                    "novel_information": 80,
+                    "contradictions_resolved": 100
+                }
             }
 
             # Run 2: Should perform research, save iteration 2, meet quality, consolidate report, send email, archive cycle
             with patch("src.maintenance.orchestrator.research_providers", return_value=mock_high_quality):
-                with patch("src.maintenance.orchestrator.generate_final_report", return_value=mock_high_quality) as mock_gen_report:
-                    with patch("src.maintenance.orchestrator._do_send_email", return_value=True) as mock_send:
-                        result = run_daily_maintenance()
-                        assert result["steps"]["research"]["status"] == "ok"
-                        assert result["steps"]["email"]["status"] == "sent"
-                        mock_gen_report.assert_called_once()
-                        mock_send.assert_called_once()
+                with patch("src.maintenance.orchestrator.generate_research_plan", return_value={"objectives": ["Test"]}):
+                    with patch("src.maintenance.orchestrator.generate_final_report", return_value=mock_high_quality) as mock_gen_report:
+                        with patch("src.maintenance.orchestrator._do_send_email", return_value=True) as mock_send:
+                            result = run_daily_maintenance()
+                            assert result["steps"]["research"]["status"] == "ok"
+                            assert result["steps"]["email"]["status"] == "sent"
+                            mock_gen_report.assert_called_once()
+                            mock_send.assert_called_once()
 
             # Verify active iteration files deleted and cycle archived
             assert not (tmp_path / "research" / "iteration_1.md").exists()
@@ -176,7 +232,7 @@ def test_orchestrator_integration():
             with open(tmp_path / "research_runtime.json") as f:
                 state = json.load(f)
             assert state["iteration"] == 1
-            assert state["quality_score"] == 0
+            assert state["quality_metrics"]["overall_quality"] == 0
 
     print("    PASSED")
 

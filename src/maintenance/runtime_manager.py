@@ -13,10 +13,17 @@ logger = get_logger("runtime_manager")
 class RuntimeManager:
     """Manages the persistent state and execution decisions for the research workflow."""
 
-    def __init__(self, data_dir: Path, max_iterations: int = 8):
+    def __init__(self, data_dir: Path, config=None):
         self.data_dir = Path(data_dir)
         self.state_file = self.data_dir / "research_runtime.json"
-        self.max_iterations = max_iterations
+        
+        if config is None:
+            from ..utils.config import load_config
+            self.config = load_config()
+        else:
+            self.config = config
+            
+        self.max_iterations = self.config.research_max_iterations
         self.state = {}
         self.load_state()
 
@@ -48,7 +55,28 @@ class RuntimeManager:
             "research_questions": [],
             "assumptions": [],
             "history": [],
-            "final_report_ready": False
+            "final_report_ready": False,
+            
+            # Upgraded state keys for the self-improving agent
+            "verified_claims": [],
+            "unverified_claims": [],
+            "resolved_questions": [],
+            "open_questions": [],
+            "research_queue": [],
+            "contradictions": [],
+            "long_term_memory": "",
+            "current_plan": {},
+            
+            # Structured quality metrics
+            "quality_metrics": {
+                "coverage": 0,
+                "verification": 0,
+                "source_diversity": 0,
+                "novel_information": 0,
+                "contradictions_resolved": 0,
+                "overall_quality": 0,
+                "reason": "Initial state"
+            }
         }
         self.save_state()
 
@@ -67,24 +95,60 @@ class RuntimeManager:
 
     def should_send_email(self) -> bool:
         """Decide if workflow requirements are met to send the final email."""
-        quality = self.state.get("quality_score", 0)
+        metrics = self.state.get("quality_metrics", {})
+        overall_quality = metrics.get("overall_quality", self.state.get("quality_score", 0))
+        verification = metrics.get("verification", 0)
+        source_diversity = metrics.get("source_diversity", 0)
+
         iteration = self.state.get("iteration", 1)
         max_iter = self.state.get("max_iterations", self.max_iterations)
-        return quality >= 90 or iteration >= max_iter
+
+        quality_target = self.config.research_quality_threshold
+        min_ver = self.config.min_verification_score
+        min_div = self.config.min_source_diversity
+
+        quality_met = (
+            overall_quality >= quality_target and
+            verification >= min_ver and
+            source_diversity >= min_div
+        )
+
+        return quality_met or iteration >= max_iter
 
     def update_state(self, evaluation: dict, findings: list) -> None:
         """Update scores and tracking details from the latest iteration's evaluation."""
-        self.state["quality_score"] = evaluation.get("quality_score", 0)
-        self.state["coverage_score"] = evaluation.get("coverage_score", 0)
-        self.state["confidence_score"] = evaluation.get("confidence_score", 0)
-        self.state["completed_topics"] = evaluation.get("completed_topics", [])
-        self.state["research_questions"] = evaluation.get("research_questions", [])
-        self.state["assumptions"] = evaluation.get("assumptions", [])
+        self.state["quality_score"] = evaluation.get("overall_quality", evaluation.get("quality_score", 0))
+        self.state["coverage_score"] = evaluation.get("coverage", evaluation.get("coverage_score", 0))
+        self.state["confidence_score"] = evaluation.get("source_diversity", evaluation.get("confidence_score", 0))
+
+        # Store structured quality metrics
+        self.state["quality_metrics"] = {
+            "coverage": evaluation.get("coverage", 0),
+            "verification": evaluation.get("verification", 0),
+            "source_diversity": evaluation.get("source_diversity", 0),
+            "novel_information": evaluation.get("novel_information", 0),
+            "contradictions_resolved": evaluation.get("contradictions_resolved", 0),
+            "overall_quality": evaluation.get("overall_quality", 0),
+            "reason": evaluation.get("reason", "")
+        }
+
+        # Update tracking lists from evaluation outputs
+        self.state["verified_claims"] = evaluation.get("verified_claims", self.state.get("verified_claims", []))
+        self.state["unverified_claims"] = evaluation.get("unverified_claims", self.state.get("unverified_claims", []))
+        self.state["resolved_questions"] = evaluation.get("resolved_questions", self.state.get("resolved_questions", []))
+        self.state["open_questions"] = evaluation.get("open_questions", self.state.get("open_questions", []))
+        self.state["research_queue"] = evaluation.get("research_queue", self.state.get("research_queue", []))
+        self.state["contradictions"] = evaluation.get("contradictions", self.state.get("contradictions", []))
+
+        # Compatibility keys
+        self.state["completed_topics"] = evaluation.get("completed_topics", self.state.get("completed_topics", []))
+        self.state["research_questions"] = self.state["open_questions"]
+        self.state["assumptions"] = evaluation.get("assumptions", self.state.get("assumptions", []))
 
         # Log entry to history
         self.state["history"].append({
             "iteration": self.state["iteration"],
-            "quality_score": self.state["quality_score"],
+            "quality_metrics": self.state["quality_metrics"],
             "findings_count": len(findings),
             "timestamp": datetime.now(timezone.utc).isoformat()
         })

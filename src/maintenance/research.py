@@ -410,7 +410,7 @@ def collect_all_sources() -> list[dict]:
 # ─── LLM summarization ──────────────────────────────────────────────────────
 
 
-RESEARCH_PROMPT = """You are an AI provider research assistant. You will receive raw findings collected from official public sources (blogs, RSS feeds, announcement pages) about AI API providers, along with previous iteration research memory (if any).
+RESEARCH_PROMPT = """You are an AI provider research agent. You will receive raw findings collected from official public sources, along with previous iteration research history (Working Memory & Long-Term Memory), the current research plan, and current tracking state.
 
 Analyze the findings and respond ONLY with valid JSON (no markdown fences).
 
@@ -433,23 +433,7 @@ NEVER use "add_key" — models do not require API keys. A new model release is a
 
 Identify pricing changes, free tier changes, new models, API deprecations, and breaking changes.
 
-Additionally, you MUST evaluate the research quality and produce an iteration report. Include:
-1. "iteration_report": An object with:
-   - summary: concise summary of findings/state in this iteration.
-   - evidence: bullet points of concrete facts found in the raw findings.
-   - sources: list of source URLs.
-   - confidence: assessment of overall confidence.
-   - assumptions: assumptions made that need verification.
-   - unanswered_questions: questions that remain unanswered.
-   - contradictions: conflicting information from sources (or null if none).
-   - recommendations_next: recommendations for what to focus on in the next iteration.
-2. "evaluation": An object with:
-   - quality_score: integer from 0 to 100 reflecting the depth and correctness of findings.
-   - coverage_score: integer from 0 to 100 based on how many providers/topics were covered.
-   - confidence_score: integer from 0 to 100 based on source reliability and certainty.
-   - completed_topics: list of topics/providers successfully researched.
-   - research_questions: list of new or remaining questions for next runs.
-   - assumptions: list of current assumptions.
+Additionally, you MUST evaluate the research quality, check for contradictions against previous assertions, verify claims, update the tracking lists, and write the iteration report.
 
 Respond with JSON in this exact format:
 {
@@ -481,12 +465,45 @@ Respond with JSON in this exact format:
     "recommendations_next": "..."
   },
   "evaluation": {
-    "quality_score": 0,
-    "coverage_score": 0,
-    "confidence_score": 0,
-    "completed_topics": ["...", "..."],
-    "research_questions": ["...", "..."],
-    "assumptions": ["...", "..."]
+    "coverage": 0,
+    "verification": 0,
+    "source_diversity": 0,
+    "novel_information": 0,
+    "contradictions_resolved": 0,
+    "overall_quality": 0,
+    "reason": "explanation of scores",
+    "verified_claims": [
+      {
+        "claim": "...",
+        "evidence": "...",
+        "source": "...",
+        "confidence": "high/medium/low",
+        "verification_status": "verified"
+      }
+    ],
+    "unverified_claims": [
+      {
+        "claim": "...",
+        "evidence": "...",
+        "source": "...",
+        "confidence": "high/medium/low",
+        "verification_status": "unverified"
+      }
+    ],
+    "resolved_questions": ["..."],
+    "open_questions": ["..."],
+    "research_queue": ["..."],
+    "contradictions": [
+      {
+        "claim": "...",
+        "prev_evidence": "...",
+        "current_evidence": "...",
+        "resolution_status": "unresolved/resolved",
+        "resolution_notes": "..."
+      }
+    ],
+    "completed_topics": ["..."],
+    "assumptions": ["..."]
   }
 }
 
@@ -550,34 +567,49 @@ def _llm_summarize(
     user_prompt = f"Here are the raw findings from official sources:\n\n{context}\n\n"
 
     # Read previous iterations
-    previous_research_context = ""
     if runtime_state:
         iteration = runtime_state.get("iteration", 1)
         research_dir = config.data_dir / "research"
+        threshold = config.memory_compression_threshold
+
+        # Working Memory (recent iterations)
+        working_memory_start = max(1, iteration - threshold)
         prev_iters = []
-        for i in range(1, iteration):
+        for i in range(working_memory_start, iteration):
             p = research_dir / f"iteration_{i}.md"
             if p.exists():
                 try:
                     content = p.read_text(encoding="utf-8")
-                    prev_iters.append(f"=== ITERATION {i} ===\n{content}")
+                    prev_iters.append(f"=== WORKING MEMORY: ITERATION {i} ===\n{content}")
                 except Exception as e:
-                    logger.warning("Could not read previous iteration file %s: %s", p, e)
-        if prev_iters:
-            previous_research_context = "\n\n".join(prev_iters)
+                    logger.warning("Could not read working memory file %s: %s", p, e)
+
+        working_mem_str = "\n\n".join(prev_iters) if prev_iters else "None"
+        ltm_str = runtime_state.get("long_term_memory", "")
+        if not ltm_str:
+            ltm_str = "None"
+
+        plan_str = json.dumps(runtime_state.get("current_plan", {}), indent=2)
+
+        user_prompt += "=== CURRENT PLAN ===\n"
+        user_prompt += f"{plan_str}\n\n"
 
         user_prompt += "=== RUNTIME STATE ===\n"
         user_prompt += f"Current Iteration: {runtime_state.get('iteration', 1)}\n"
-        user_prompt += f"Previous Assumptions: {runtime_state.get('assumptions', [])}\n"
-        user_prompt += f"Previous Unanswered Questions: {runtime_state.get('research_questions', [])}\n"
-        user_prompt += f"Previous Mistakes/History: {runtime_state.get('history', [])}\n\n"
+        user_prompt += f"Verified Claims: {runtime_state.get('verified_claims', [])}\n"
+        user_prompt += f"Unverified Claims: {runtime_state.get('unverified_claims', [])}\n"
+        user_prompt += f"Open Questions: {runtime_state.get('open_questions', [])}\n"
+        user_prompt += f"Research Queue: {runtime_state.get('research_queue', [])}\n"
+        user_prompt += f"Contradictions Tracker: {runtime_state.get('contradictions', [])}\n\n"
 
-        if previous_research_context:
-            user_prompt += "=== PREVIOUS ITERATIONS' RESEARCH MEMORY ===\n"
-            user_prompt += previous_research_context + "\n\n"
+        user_prompt += "=== LONG-TERM MEMORY (COMPRESSED SUMMARY OF PAST WORK) ===\n"
+        user_prompt += f"{ltm_str}\n\n"
+
+        user_prompt += "=== WORKING MEMORY (RECENT RESEARCH ITERATIONS) ===\n"
+        user_prompt += f"{working_mem_str}\n\n"
 
         user_prompt += (
-            "Based on the previous iterations' research memory, current state, assumptions, and unanswered questions, "
+            "Based on the plan, working memory, long-term memory, claims, and open questions, "
             "perform the next level of research. Specifically address:\n"
             "- What information is still missing?\n"
             "- Which assumptions may be incorrect?\n"
@@ -837,18 +869,168 @@ def _normalize_research_result(res: dict) -> dict:
         "recommendations_next": ""
     })
     res.setdefault("evaluation", {
-        "quality_score": 60,
-        "coverage_score": 50,
-        "confidence_score": 50,
+        "coverage": 60,
+        "verification": 50,
+        "source_diversity": 50,
+        "novel_information": 50,
+        "contradictions_resolved": 50,
+        "overall_quality": 60,
+        "reason": "Fallback normalization",
+        "verified_claims": [],
+        "unverified_claims": [],
+        "resolved_questions": [],
+        "open_questions": [],
+        "research_queue": [],
+        "contradictions": [],
         "completed_topics": [],
-        "research_questions": [],
         "assumptions": []
     })
     return res
 
 
+def generate_research_plan(config: Config, key_manager: KeyManager, runtime_state: dict) -> dict:
+    """Generate a structured research plan before research begins using the LLM."""
+    iteration = runtime_state.get("iteration", 1)
+
+    plan_prompt = """You are a research planning agent. Generate a structured research plan for iteration {iteration} of AI provider research.
+    Analyze the current state:
+    - Verified Claims: {verified_claims}
+    - Unverified Claims: {unverified_claims}
+    - Open Questions: {open_questions}
+    - Research Queue: {research_queue}
+    - Contradictions: {contradictions}
+    - Long-Term Memory Summary: {long_term_memory}
+
+    Formulate a plan to search, verify, and resolve gaps.
+    Prevent repetition: do not research already completed topics or verified claims unless new contradictory evidence has been flagged.
+
+    Respond ONLY with a valid JSON object (no markdown fences) containing:
+    {{
+      "objectives": ["objective 1", "objective 2"],
+      "claims_to_verify": ["claim to check 1", "claim to check 2"],
+      "questions_to_answer": ["question 1", "question 2"],
+      "sources_to_search": ["specific provider blogs or RSS feeds to pay attention to"],
+      "expected_deliverables": ["deliverable 1", "deliverable 2"]
+    }}
+    """
+
+    rotator = KeyRotator(config, key_manager)
+    provider_name = config.active_provider
+    try:
+        provider = create_provider(provider_name)
+    except Exception as e:
+        logger.error("Cannot create provider for planning: %s", e)
+        return _default_plan()
+
+    formatted_prompt = plan_prompt.format(
+        iteration=iteration,
+        verified_claims=json.dumps(runtime_state.get("verified_claims", [])),
+        unverified_claims=json.dumps(runtime_state.get("unverified_claims", [])),
+        open_questions=json.dumps(runtime_state.get("open_questions", [])),
+        research_queue=json.dumps(runtime_state.get("research_queue", [])),
+        contradictions=json.dumps(runtime_state.get("contradictions", [])),
+        long_term_memory=runtime_state.get("long_term_memory", "")
+    )
+
+    messages = [
+        ChatMessage(role="system", content="You are a research planning assistant. Respond only with valid JSON."),
+        ChatMessage(role="user", content=formatted_prompt),
+    ]
+    model = provider.get_default_model()
+
+    logger.info("PLANNER: Generating plan for iteration %d using %s", iteration, provider_name)
+
+    def request_fn(api_key: str):
+        return provider.chat(api_key, model, messages)
+
+    result = rotator.execute_with_rotation(provider_name, request_fn)
+    if not result.success or not result.response:
+        logger.error("LLM planner failed: %s", result.error)
+        return _default_plan()
+
+    parsed = _parse_findings(result.response.content)
+    if parsed:
+        return parsed
+    return _default_plan()
+
+
+def _default_plan() -> dict:
+    return {
+        "objectives": ["Identify recent AI model releases and provider updates."],
+        "claims_to_verify": [],
+        "questions_to_answer": ["What are the latest models released in the last 30 days?"],
+        "sources_to_search": ["All available public RSS feeds and blogs."],
+        "expected_deliverables": ["List of new models, pricing changes, and deprecations."]
+    }
+
+
+def compress_memory(config: Config, key_manager: KeyManager, runtime_state: dict) -> str:
+    """Summarize older iterations to keep working memory small while preserving knowledge."""
+    iteration = runtime_state.get("iteration", 1)
+    threshold = config.memory_compression_threshold
+
+    compress_limit = iteration - threshold
+    if compress_limit <= 0:
+        return runtime_state.get("long_term_memory", "")
+
+    research_dir = config.data_dir / "research"
+    older_contents = []
+    for i in range(1, compress_limit + 1):
+        p = research_dir / f"iteration_{i}.md"
+        if p.exists():
+            try:
+                older_contents.append(f"=== ITERATION {i} ===\n{p.read_text(encoding='utf-8')}")
+            except Exception as e:
+                logger.error("Could not read older iteration %d for compression: %s", i, e)
+
+    if not older_contents:
+        return runtime_state.get("long_term_memory", "")
+
+    combined_older = "\n\n".join(older_contents)
+    current_ltm = runtime_state.get("long_term_memory", "")
+
+    compression_prompt = """You are a knowledge consolidation agent. Combine the existing Long-Term Memory summary with the new older research iteration reports.
+
+    Your goal is to produce a single, highly compressed, factual summary of the historic findings. Keep it extremely concise but do not lose key verified claims, timeline events, or resolutions of past issues.
+
+    Existing Long-Term Memory:
+    {current_ltm}
+
+    New Older Iteration Reports to consolidate:
+    {combined_older}
+
+    Respond with the consolidated, polished summary in markdown format.
+    """
+
+    rotator = KeyRotator(config, key_manager)
+    provider_name = config.active_provider
+    try:
+        provider = create_provider(provider_name)
+    except Exception as e:
+        logger.error("Cannot create provider for memory compression: %s", e)
+        return current_ltm
+
+    messages = [
+        ChatMessage(role="system", content="You are a knowledge consolidation assistant. Respond only with markdown summary."),
+        ChatMessage(role="user", content=compression_prompt.format(current_ltm=current_ltm, combined_older=combined_older)),
+    ]
+    model = provider.get_default_model()
+
+    logger.info("MEMORY COMPRESSOR: Consolidating iterations 1 to %d into Long-Term Memory", compress_limit)
+
+    def request_fn(api_key: str):
+        return provider.chat(api_key, model, messages)
+
+    result = rotator.execute_with_rotation(provider_name, request_fn)
+    if not result.success or not result.response:
+        logger.error("Memory consolidation failed: %s", result.error)
+        return current_ltm
+
+    return result.response.content.strip()
+
+
 def generate_final_report(config: Config, key_manager: KeyManager, runtime_state: dict) -> dict:
-    """Consolidate all iteration reports into a single, polished final report using the LLM."""
+    """Consolidate all iteration reports and memory into a single, polished final report using the LLM."""
     iteration = runtime_state.get("iteration", 1)
     research_dir = config.data_dir / "research"
 
@@ -863,20 +1045,26 @@ def generate_final_report(config: Config, key_manager: KeyManager, runtime_state
                 logger.error("Could not read iteration %d file: %s", i, e)
 
     combined_context = "\n\n".join(iters_content)
+    ltm = runtime_state.get("long_term_memory", "")
 
-    # Prompt the LLM to merge and polish
-    merge_prompt = """You are a senior AI research analyst. You are given a series of research iterations about AI provider updates, model releases, and pricing changes.
+    # Prompt the LLM to consolidate
+    merge_prompt = """You are a senior AI research analyst. You are given a series of research iterations and a long-term memory summary about AI provider updates, model releases, and pricing changes.
 
     Your task is to:
     1. Merge all findings from all iterations.
     2. Remove duplicate findings.
     3. Resolve any contradictions between different iterations (favoring more recent, verified findings).
-    4. Produce a single polished, comprehensive markdown report summary under "summary" and a final consolidated JSON list of findings under "findings".
+    4. Rank findings by confidence level.
+    5. Generate a single highly polished, comprehensive final report containing:
+       - Executive Summary
+       - Key Provider Updates & Model Releases (ranked by confidence)
+       - Pricing & Free-Tier Changes
+       - Verified Claims vs. Unresolved Gaps / Future Questions
 
     Respond ONLY with a valid JSON object (no markdown fences) containing:
-    {
+    {{
       "findings": [
-        {
+        {{
           "provider": "...",
           "model": "...",
           "description": "...",
@@ -884,15 +1072,15 @@ def generate_final_report(config: Config, key_manager: KeyManager, runtime_state
           "type": "...",
           "action": "...",
           "confidence": "..."
-        }
+        }}
       ],
-      "summary": "A comprehensive, high-quality markdown formatted final research report. Include sections for Executive Summary, Key Provider Updates, Model Releases, Pricing/Free-Tier Changes, and Strategic Recommendations.",
+      "summary": "Polished comprehensive final research report in Markdown.",
       "new_providers": ["..."],
       "new_models": ["..."],
       "pricing_changes": ["..."],
       "free_tier_changes": ["..."],
       "breaking_changes": ["..."]
-    }
+    }}
     """
 
     rotator = KeyRotator(config, key_manager)
@@ -905,7 +1093,7 @@ def generate_final_report(config: Config, key_manager: KeyManager, runtime_state
 
     messages = [
         ChatMessage(role="system", content="You are a report consolidation assistant. Respond only with valid JSON."),
-        ChatMessage(role="user", content=f"{merge_prompt}\n\nHere are the iterations:\n\n{combined_context}"),
+        ChatMessage(role="user", content=merge_prompt.format() + f"\n\nLong-Term Memory:\n{ltm}\n\nIterations:\n{combined_context}"),
     ]
     model = provider.get_default_model()
 

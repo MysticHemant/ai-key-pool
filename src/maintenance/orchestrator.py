@@ -27,7 +27,7 @@ from ..utils.config_validator import validate_config, ConfigValidationReport
 from ..utils.logger import get_logger
 from ..startup import sync_provider_keys
 from ..providers.provider_factory import list_providers, get_provider_status
-from .research import research_providers, generate_final_report
+from .research import research_providers, generate_final_report, generate_research_plan, compress_memory
 from .dashboard_gen import generate_status_json, generate_recommendations_json
 from .email_sender import send_daily_summary, EmailDeliveryError
 from .runtime_manager import RuntimeManager
@@ -77,7 +77,7 @@ def run_daily_maintenance() -> dict:
     step_results: dict = {}
 
     config = load_config()
-    runtime_manager = RuntimeManager(config.data_dir)
+    runtime_manager = RuntimeManager(config.data_dir, config)
     runtime_state = runtime_manager.state
 
     # Dashboard output directory (GitHub Pages serves from here)
@@ -177,6 +177,28 @@ def run_daily_maintenance() -> dict:
         errors.append("Health check failed")
         logger.error("STEP FAIL: Health check (%.1fs)", health_duration)
 
+    # ── Step 1a: Research planning ──
+    if config.research_planner_enabled:
+        logger.info("STEP START: Generating research plan")
+        plan = generate_research_plan(config, key_manager, runtime_state)
+        runtime_manager.state["current_plan"] = plan
+        runtime_manager.save_state()
+        logger.info("Research plan generated: Objectives=%s", plan.get("objectives", []))
+    else:
+        logger.info("Research planning is disabled.")
+
+    # ── Step 1b: Memory compression ──
+    iteration = runtime_manager.determine_current_iteration()
+    if iteration > config.memory_compression_threshold:
+        logger.info("STEP START: Memory compression")
+        compressed = compress_memory(config, key_manager, runtime_state)
+        runtime_manager.state["long_term_memory"] = compressed
+        runtime_manager.save_state()
+        logger.info("Older iterations compressed into Long-Term Memory")
+    else:
+        logger.info("Iteration count %d <= compression threshold %d. Skipping memory compression.",
+                    iteration, config.memory_compression_threshold)
+
     # ── Step 2: Research ──
     logger.info("STEP START: Provider research")
     history_path = config.data_dir / "research_history.json"
@@ -227,7 +249,27 @@ def run_daily_maintenance() -> dict:
             except Exception as e:
                 logger.error("Failed to write iteration report to %s: %s", iter_file, e)
 
-            runtime_manager.update_state(research_data.get("evaluation", {}), research_data.get("findings", []))
+            eval_data = research_data.get("evaluation", {})
+            runtime_manager.update_state(eval_data, research_data.get("findings", []))
+
+            # Upgraded Logging:
+            logger.info("=" * 40)
+            logger.info("RESEARCH ITERATION DIAGNOSTICS")
+            logger.info("  Current Iteration: %d", iteration)
+            logger.info("  Objectives: %s", runtime_state.get("current_plan", {}).get("objectives", []))
+            logger.info("  New Verified Claims Count: %d", len(eval_data.get("verified_claims", [])))
+            logger.info("  Remaining Unverified Claims Count: %d", len(eval_data.get("unverified_claims", [])))
+            logger.info("  New Assumptions: %s", eval_data.get("assumptions", []))
+            logger.info("  Open Questions: %s", eval_data.get("open_questions", []))
+            logger.info("  Contradictions Detected Count: %d", len(eval_data.get("contradictions", [])))
+            logger.info("  Quality Metrics: Overall=%d, Coverage=%d, Verification=%d, Source Diversity=%d",
+                        eval_data.get("overall_quality", 0),
+                        eval_data.get("coverage", 0),
+                        eval_data.get("verification", 0),
+                        eval_data.get("source_diversity", 0))
+            logger.info("  Metric Reason: %s", eval_data.get("reason", ""))
+            logger.info("  Decision: %s", "STOPPING (target quality met or max iterations reached)" if runtime_manager.should_send_email() else "CONTINUING to next iteration")
+            logger.info("=" * 40)
 
         step_results["research"] = {
             "status": "ok" if research_success else "error",

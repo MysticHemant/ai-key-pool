@@ -31,6 +31,13 @@ class Config:
     max_consecutive_failures: int = 5
     data_dir: Path = DATA_DIR
     log_level: str = "INFO"
+    research_max_iterations: int = 8
+    research_quality_threshold: int = 90
+    min_verification_score: int = 80
+    min_source_diversity: int = 70
+    memory_compression_threshold: int = 4
+    research_planner_enabled: bool = True
+    contradiction_detection_enabled: bool = True
 
 
 def load_config(config_path: Optional[Path] = None) -> Config:
@@ -49,12 +56,25 @@ def load_config(config_path: Optional[Path] = None) -> Config:
     Returns:
         Config instance
     """
+    def _bool_env(key: str, default: bool) -> bool:
+        val = os.environ.get(key)
+        if val is None:
+            return default
+        return val.lower() in ("true", "1", "yes")
+
     config = Config(
         master_key=os.environ.get("AIKEYPOOL_MASTER_KEY"),
         active_provider=os.environ.get("AIKEYPOOL_ACTIVE_PROVIDER", ""),
         retry_count=int(os.environ.get("AIKEYPOOL_RETRY_COUNT", "3")),
         max_consecutive_failures=int(os.environ.get("AIKEYPOOL_MAX_CONSECUTIVE_FAILURES", "5")),
         log_level=os.environ.get("AIKEYPOOL_LOG_LEVEL", "INFO"),
+        research_max_iterations=int(os.environ.get("AIKEYPOOL_RESEARCH_MAX_ITERATIONS", "8")),
+        research_quality_threshold=int(os.environ.get("AIKEYPOOL_RESEARCH_QUALITY_THRESHOLD", "90")),
+        min_verification_score=int(os.environ.get("AIKEYPOOL_MIN_VERIFICATION_SCORE", "80")),
+        min_source_diversity=int(os.environ.get("AIKEYPOOL_MIN_SOURCE_DIVERSITY", "70")),
+        memory_compression_threshold=int(os.environ.get("AIKEYPOOL_MEMORY_COMPRESSION_THRESHOLD", "4")),
+        research_planner_enabled=_bool_env("AIKEYPOOL_RESEARCH_PLANNER_ENABLED", True),
+        contradiction_detection_enabled=_bool_env("AIKEYPOOL_CONTRADICTION_DETECTION_ENABLED", True),
     )
 
     data_dir = os.environ.get("AIKEYPOOL_DATA_DIR")
