@@ -102,6 +102,7 @@ ai-key-pool/
 │   │   ├── fallback_chain.py        # 3-phase fallback with deterministic fallback
 │   │   ├── github_models.py         # GitHub Models adapter (models.github.ai)
 │   │   ├── groq.py                  # Groq adapter (api.groq.com)
+│   │   ├── gemini.py                # Gemini native API adapter (generativelanguage.googleapis.com)
 │   │   ├── openrouter.py            # OpenRouter adapter (openrouter.ai)
 │   │   ├── provider_factory.py      # create_provider(), list_providers()
 │   │   └── plugins/                 # Plugin system for generic providers
@@ -142,7 +143,10 @@ ai-key-pool/
 │   ├── test_fallback_chain.py       # Fallback chain tests
 │   ├── test_agents.py               # Multi-agent research tests
 │   ├── test_discovery.py            # Provider discovery tests
-│   └── test_history_tracker.py      # History tracking tests
+│   ├── test_history_tracker.py      # History tracking tests
+│   ├── test_report_sections.py      # Executive report section tests
+│   ├── test_runtime_manager.py      # Runtime manager and orchestrator integration tests
+│   └── test_simulation.py           # Full simulation tests
 │
 ├── data/                            # Runtime state (gitignored)
 │   ├── key_registry.json            # Key entries and statuses
@@ -407,8 +411,19 @@ run_daily_maintenance()
 │     └─ Filters out findings for already-configured providers
 │     └─ Includes suggested_providers from discovery
 │
-├─ Step 6: Email Delivery
-│  └─ _do_send_email()
+├─ Step 6: Email Delivery (Executive Intelligence Briefing)
+│  └─ _do_send_email() → send_daily_summary()
+│     ├─ Build executive briefing HTML with:
+│     │  ├─ Executive Summary (What changed? Why? What to do?)
+│     │  ├─ Top Developments (new providers, models, rate limits)
+│     │  ├─ Capability Gap Analysis (Reasoning/Vision/Long Context/Coding coverage)
+│     │  ├─ Key Health table (status/failure reason/reliability/action)
+│     │  ├─ Verified Findings (deduplicated)
+│     │  ├─ Contradictions (conflicting claims)
+│     │  └─ Action Items (max 5, prioritized)
+│     ├─ Shows "Research unavailable" with reason when data missing
+│     ├─ Never repeats findings, no raw markdown
+│     └─ Metadata: generation time, iterations, sources, providers tracked
 │
 ├─ Step 7: Archive Cycle
 │  └─ runtime_manager.archive_cycle()
@@ -557,6 +572,7 @@ BaseProvider (ABC)
 |----------|----------|-------------|--------------|----------|
 | GitHub Models | `models.github.ai/inference/chat/completions` | Bearer + `X-GitHub-Api-Version` | reasoning, coding | 3 |
 | Groq | `api.groq.com/openai/v1/chat/completions` | Bearer | fast_inference, reasoning, coding | 1 |
+| Gemini | `generativelanguage.googleapis.com/v1beta/models/{model}:generateContent` | API Key (query param) | reasoning, coding, long_context, vision | 2 |
 | OpenRouter | `openrouter.ai/api/v1/chat/completions` | Bearer + optional headers | reasoning, coding, long_context, vision | 5 |
 
 ### Provider Factory (Dynamic)
@@ -564,7 +580,7 @@ BaseProvider (ABC)
 ```python
 # provider_factory.py — no hardcoded PROVIDER_MAP
 def create_provider(provider_name: str, **kwargs) -> BaseProvider
-    # 1. Check builtin adapters (GitHub Models, Groq, OpenRouter)
+    # 1. Check builtin adapters (GitHub Models, Groq, Gemini, OpenRouter)
     # 2. Check manifest registry for generic providers
     # 3. Fall back to env var discovery
     # Raises ValueError if unknown

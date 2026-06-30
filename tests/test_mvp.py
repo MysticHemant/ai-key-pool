@@ -243,9 +243,12 @@ def test_email_generation():
     from src.maintenance.email_sender import _build_html_body
 
     html = _build_html_body(
-        status={"active_provider": "groq", "total_keys": 5, "healthy_keys": 3, "exhausted_keys": 1, "disabled_keys": 1},
-        recommendations={"findings": [{"name": "Test", "description": "Desc", "action": "add_key"}], "summary": "Test summary"},
+        status={"total_keys": 5, "healthy_keys": 3, "exhausted_keys": 1, "disabled_keys": 1, "providers": {"groq": {"healthy_keys": 2, "total_keys": 3}}},
+        recommendations={"findings": [{"name": "Test", "description": "Desc", "action": "add_key"}], "summary": "Test summary", "sections": {"executive_summary": "Test summary"}},
         errors=["Test error"],
+        configured_providers=["groq"],
+        provider_health={"groq": {"healthy_keys": 2, "total_keys": 3}},
+        iterations_completed=2,
     )
     assert "groq" in html
     assert "Test" in html

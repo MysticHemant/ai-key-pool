@@ -398,11 +398,11 @@ def _run_research_loop(
     runtime_manager: RuntimeManager,
     history_path: Path,
     session_start: float,
-) -> tuple[dict, str]:
+) -> tuple[dict, str, int]:
     """Run the research loop until completion or safety limits.
 
     Returns:
-        (research_data, completion_reason) tuple
+        (research_data, completion_reason, iterations_completed) tuple
     """
     max_iterations = config.research_max_iterations
     max_runtime_seconds = config.research_max_runtime_minutes * 60
@@ -498,7 +498,7 @@ def _run_research_loop(
     logger.info("Reason: %s", completion_reason)
     logger.info("Total research time: %.1fs", elapsed)
 
-    return research_data, completion_reason
+    return research_data, completion_reason, iterations_completed
 
 
 def run_daily_maintenance() -> dict:
@@ -690,7 +690,7 @@ def run_daily_maintenance() -> dict:
     # ── Step 2: Research loop (continuous iterations) ──
     logger.info("STEP START: Research loop")
     history_path = config.data_dir / "research_history.json"
-    research_data, completion_reason = _run_research_loop(
+    research_data, completion_reason, iterations_completed = _run_research_loop(
         config, key_manager, runtime_manager, history_path, overall_start
     )
     logger.info("STEP END: Research loop — reason: %s", completion_reason)
@@ -769,10 +769,12 @@ def run_daily_maintenance() -> dict:
     logger.info("STEP START: Email delivery")
     email_result = False
     email_duration = 0.0
+    overall_duration = time.monotonic() - overall_start
 
     email_result, email_duration = _time_step(
         _do_send_email, config, stats, research_data, errors,
         available_providers, discovery_results if discovery_result is not _EXCEPTION else None,
+        overall_duration, iterations_completed,
     )
     if email_result is not _EXCEPTION:
         step_results["email"] = {
@@ -870,6 +872,8 @@ def _do_send_email(
     errors: list[str],
     available_providers: list[str] = None,
     discovery_results: dict = None,
+    maintenance_duration: float = 0.0,
+    iterations_completed: int = 0,
 ) -> bool:
     """Send email. Returns True if sent, False if skipped."""
     from ..providers.manifest import manifest_registry
@@ -910,6 +914,8 @@ def _do_send_email(
             configured_providers=configured_providers,
             discovery_results=discovery_results,
             provider_health=provider_health,
+            maintenance_duration=maintenance_duration,
+            iterations_completed=iterations_completed,
         )
     except EmailDeliveryError as e:
         logger.error("EMAIL FAILED at stage '%s': %s", e.stage, e.detail)
