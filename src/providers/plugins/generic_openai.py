@@ -12,12 +12,43 @@ Supports any provider that implements the OpenAI chat completions API:
 Configuration via environment variables:
     AIKEYPOOL_PROVIDER_<NAME>_ENDPOINT  — chat completions URL
     AIKEYPOOL_PROVIDER_<NAME>_MODEL     — default model name
+    AIKEYPOOL_PROVIDER_<NAME>_CAPABILITIES — comma-separated capability tags
+    AIKEYPOOL_PROVIDER_<NAME>_PRIORITY  — routing priority (lower = higher)
 """
 
 import os
 from typing import Optional
 
 from ..base_provider import BaseProvider
+from ..manifest import ProviderManifest
+
+
+# Default capabilities for known providers
+_DEFAULT_CAPABILITIES = {
+    "together": ["reasoning", "coding", "long_context"],
+    "fireworks": ["reasoning", "coding", "fast_inference"],
+    "mistral": ["reasoning", "coding", "vision", "long_context"],
+    "cerebras": ["fast_inference", "reasoning"],
+    "deepinfra": ["reasoning", "coding", "long_context"],
+    "openai": ["reasoning", "coding", "vision", "long_context"],
+    "sambanova": ["fast_inference", "reasoning", "coding"],
+    "novita": ["reasoning", "coding"],
+    "chutes": ["reasoning", "coding"],
+    "groq": ["fast_inference", "reasoning", "coding"],
+}
+
+_DEFAULT_PRIORITY = {
+    "together": 4,
+    "fireworks": 5,
+    "mistral": 3,
+    "cerebras": 2,
+    "deepinfra": 6,
+    "openai": 2,
+    "sambanova": 3,
+    "novita": 7,
+    "chutes": 8,
+    "groq": 1,
+}
 
 
 class GenericOpenAIProvider(BaseProvider):
@@ -39,6 +70,9 @@ class GenericOpenAIProvider(BaseProvider):
         "cerebras": ("https://api.cerebras.ai/v1/chat/completions", "llama-3.3-70b"),
         "deepinfra": ("https://api.deepinfra.com/v1/openai/chat/completions", "meta-llama/Meta-Llama-3.1-70B-Instruct"),
         "openai": ("https://api.openai.com/v1/chat/completions", "gpt-4o-mini"),
+        "sambanova": ("https://api.sambanova.ai/v1/chat/completions", "Meta-Llama-3.1-70B-Instruct"),
+        "novita": ("https://api.novita.ai/v3/openai/chat/completions", "meta-llama-3.1-70b-instruct"),
+        "chutes": ("https://api.chutes.ai/v1/chat/completions", "deepseek-ai/DeepSeek-V3"),
         "anthropic": None,  # Not OpenAI-compatible
         "github_models": None,  # Has its own adapter
         "openrouter": None,  # Has its own adapter
@@ -89,3 +123,53 @@ class GenericOpenAIProvider(BaseProvider):
 
     def get_default_model(self) -> str:
         return self._default_model
+
+    def get_manifest(self) -> ProviderManifest:
+        """Return manifest for this generic provider.
+
+        Reads capabilities and priority from environment variables:
+            AIKEYPOOL_PROVIDER_<NAME>_CAPABILITIES — comma-separated tags
+            AIKEYPOOL_PROVIDER_<NAME>_PRIORITY — integer priority
+        """
+        name = self._provider_name.lower()
+
+        # Detect capabilities from env or defaults
+        caps_key = f"AIKEYPOOL_PROVIDER_{name.upper()}_CAPABILITIES"
+        env_caps = os.environ.get(caps_key, "")
+        if env_caps:
+            capabilities = [c.strip() for c in env_caps.split(",") if c.strip()]
+        else:
+            capabilities = list(_DEFAULT_CAPABILITIES.get(name, ["reasoning", "coding"]))
+
+        # Detect priority from env or defaults
+        pri_key = f"AIKEYPOOL_PROVIDER_{name.upper()}_PRIORITY"
+        env_pri = os.environ.get(pri_key, "")
+        if env_pri:
+            try:
+                priority = int(env_pri)
+            except ValueError:
+                priority = 10
+        else:
+            priority = _DEFAULT_PRIORITY.get(name, 10)
+
+        # Detect supported models from env or use default
+        models_key = f"AIKEYPOOL_PROVIDER_{name.upper()}_MODELS"
+        env_models = os.environ.get(models_key, "")
+        if env_models:
+            supported_models = [m.strip() for m in env_models.split(",") if m.strip()]
+        else:
+            supported_models = [self._default_model] if self._default_model else []
+
+        display_name = name.replace("_", " ").title()
+
+        return ProviderManifest(
+            provider_id=name,
+            display_name=display_name,
+            adapter="generic",
+            supported_models=supported_models,
+            capabilities=capabilities,
+            priority=priority,
+            health="unknown",
+            endpoint=self._endpoint,
+            default_model=self._default_model,
+        )

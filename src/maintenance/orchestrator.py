@@ -27,9 +27,11 @@ from ..key_pool import KeyManager, KeyRotator
 from ..utils.config import load_config, Config
 from ..utils.config_validator import validate_config, ConfigValidationReport
 from ..utils.logger import get_logger
-from ..startup import sync_provider_keys
-from ..providers.provider_factory import list_providers, get_provider_status
+from ..startup import sync_provider_keys, load_provider_keys
+from ..providers.provider_factory import list_providers, get_provider_status, get_manifest_registry
 from .research import research_providers, generate_final_report, generate_research_plan, compress_memory
+from .discovery import discover_providers, save_discovery_results
+from .history_tracker import HistoryTracker
 from .dashboard_gen import generate_status_json, generate_recommendations_json
 from .email_sender import send_daily_summary, EmailDeliveryError
 from .runtime_manager import RuntimeManager
@@ -56,6 +58,104 @@ def _time_step(func, *args, **kwargs):
         duration = time.monotonic() - start
         logger.error("Step failed after %.1fs: %s", duration, e)
         return _EXCEPTION, duration
+
+
+def _log_startup_diagnostics(
+    config: Config,
+    key_manager: KeyManager,
+    available_providers: list[str],
+    provider_status: dict,
+) -> None:
+    """Log provider diagnostics before maintenance begins.
+
+    Logs all detected providers, key counts, health status, the selected
+    active provider, and reasons for skipping any provider.  Never logs
+    actual API key values.
+    """
+    registry = key_manager.registry
+    health = key_manager.health_checker
+
+    # ── All detected providers ──
+    logger.info("STARTUP DIAGNOSTICS: %d provider(s) detected via env", len(available_providers))
+    for name in sorted(available_providers):
+        kind = provider_status.get(name, "unknown")
+        logger.info("  [%s] type=%s", name, kind)
+
+    # ── Keys loaded per provider ──
+    registry_stats = registry.get_stats()
+    by_provider = registry_stats.get("by_provider", {})
+
+    if not by_provider:
+        logger.warning("STARTUP DIAGNOSTICS: No keys loaded for any provider")
+    else:
+        logger.info("STARTUP DIAGNOSTICS: Keys loaded by provider:")
+        for pname in sorted(by_provider):
+            pinfo = by_provider[pname]
+            logger.info(
+                "  [%s] total=%d active=%d exhausted=%d disabled=%d",
+                pname, pinfo["total"],
+                pinfo.get("active", 0), pinfo.get("exhausted", 0), pinfo.get("disabled", 0),
+            )
+
+    # ── Health status per provider ──
+    health_stats = health.get_stats()
+    logger.info(
+        "STARTUP DIAGNOSTICS: Health — healthy=%d, degraded=%d, unhealthy=%d, unknown=%d",
+        health_stats.get("healthy", 0),
+        health_stats.get("degraded", 0),
+        health_stats.get("unhealthy", 0),
+        health_stats.get("unknown", 0),
+    )
+
+    # Per-provider healthy key count
+    all_healthy = set(health.get_all_healthy_keys())
+    healthy_by_provider: dict[str, int] = {}
+    for key_id, entry in registry.keys.items():
+        if key_id in all_healthy:
+            healthy_by_provider.setdefault(entry.provider, 0)
+            healthy_by_provider[entry.provider] += 1
+
+    for pname in sorted(by_provider):
+        total = by_provider[pname]["total"]
+        h_count = healthy_by_provider.get(pname, 0)
+        logger.info("  [%s] healthy_keys=%d/%d", pname, h_count, total)
+
+    # ── Active provider selection ──
+    active = config.active_provider
+    if active:
+        active_keys = registry.get_healthy_keys(active)
+        if active_keys:
+            logger.info(
+                "STARTUP DIAGNOSTICS: Active provider for LLM calls = [%s] (%d healthy key(s))",
+                active, len(active_keys),
+            )
+        else:
+            logger.warning(
+                "STARTUP DIAGNOSTICS: Active provider = [%s] but NO healthy keys available — "
+                "LLM calls will fail",
+                active,
+            )
+    else:
+        logger.warning("STARTUP DIAGNOSTICS: No active provider configured (AIKEYPOOL_ACTIVE_PROVIDER unset)")
+
+    # ── Skipped providers (detected but not active) ──
+    registered = set(registry.get_all_providers())
+    detected_not_registered = set(available_providers) - registered
+    registered_not_detected = registered - set(available_providers)
+
+    for pname in sorted(detected_not_registered):
+        reason = "no keys loaded (env var missing or empty)"
+        logger.info("STARTUP DIAGNOSTICS: [%s] SKIPPED — %s", pname, reason)
+
+    for pname in sorted(registered_not_detected):
+        entry_count = len(registry.get_keys_for_provider(pname))
+        healthy_count = len(registry.get_healthy_keys(pname))
+        if healthy_count == 0:
+            reason = "all keys unhealthy or disabled"
+        else:
+            reason = "detected in registry but not in provider factory"
+        logger.info("STARTUP DIAGNOSTICS: [%s] SKIPPED — %s (keys=%d, healthy=%d)",
+                     pname, reason, entry_count, healthy_count)
 
 
 def _run_single_iteration(
@@ -445,7 +545,19 @@ def run_daily_maintenance() -> dict:
         config.max_consecutive_failures,
     )
 
-    # ── Step 0b: Key synchronization ──
+    # ── Step 0b: Dynamic key loading ──
+    logger.info("STEP START: Dynamic key loading")
+    key_load_start = time.monotonic()
+    try:
+        load_provider_keys(config)
+        key_load_duration = time.monotonic() - key_load_start
+        logger.info("STEP END: Dynamic key loading — %.1fs", key_load_duration)
+    except Exception as e:
+        key_load_duration = time.monotonic() - key_load_start
+        logger.error("STEP FAIL: Dynamic key loading — %s (%.1fs)", e, key_load_duration)
+        errors.append(f"Key loading: {e}")
+
+    # ── Step 0c: Key synchronization ──
     logger.info("STEP START: Key synchronization")
     sync_start = time.monotonic()
     try:
@@ -474,13 +586,12 @@ def run_daily_maintenance() -> dict:
         available_providers = []
         provider_status = {}
 
-    # Log diagnostics
+    # ── Startup diagnostics ──
+    _log_startup_diagnostics(config, key_manager, available_providers, provider_status)
+
+    # Derive loaded_providers/keys_loaded for downstream result dict and GitHub Actions diagnostics
     loaded_providers = list(key_manager.registry.get_all_providers())
     keys_loaded = len(key_manager.registry.keys)
-    logger.info("DIAGNOSTIC: Loaded providers: %s", loaded_providers)
-    logger.info("DIAGNOSTIC: Keys loaded: %d", keys_loaded)
-    logger.info("DIAGNOSTIC: Active provider: %s", config.active_provider)
-    logger.info("DIAGNOSTIC: Available providers: %s", available_providers)
 
     stats = {"registry": {"total_keys": 0, "by_status": {}}, "health": {}}
 
@@ -504,6 +615,55 @@ def run_daily_maintenance() -> dict:
         }
         errors.append("Health check failed")
         logger.error("STEP FAIL: Health check (%.1fs)", health_duration)
+
+    # ── Step 1b: GitHub Discovery ──
+    logger.info("STEP START: GitHub Discovery")
+    discovery_result, discovery_duration = _time_step(discover_providers, config)
+    if discovery_result is not _EXCEPTION:
+        try:
+            save_discovery_results(discovery_result, config.data_dir)
+        except Exception as e:
+            logger.warning("Could not save discovery results: %s", e)
+        step_results["discovery"] = {
+            "status": "ok",
+            "duration_seconds": round(discovery_duration, 2),
+            "new_suggestions": discovery_result.get("new_suggestions", 0),
+            "sources_checked": discovery_result.get("sources_checked", 0),
+        }
+        logger.info(
+            "STEP END: GitHub Discovery — %d new suggestions in %.1fs",
+            discovery_result.get("new_suggestions", 0), discovery_duration,
+        )
+    else:
+        step_results["discovery"] = {
+            "status": "error",
+            "duration_seconds": round(discovery_duration, 2),
+        }
+        logger.error("STEP FAIL: GitHub Discovery (%.1fs)", discovery_duration)
+
+    # ── Step 1c: History Tracking ──
+    logger.info("STEP START: History Tracking")
+    history_tracker = HistoryTracker(config.data_dir)
+    # Update provider history from manifest registry
+    from ..providers.manifest import manifest_registry
+    for manifest in manifest_registry.get_all().values():
+        history_tracker.update_provider(
+            manifest.provider_id,
+            status=manifest.health,
+            models=manifest.supported_models,
+            capabilities=manifest.capabilities,
+        )
+    # Record discoveries
+    if discovery_result is not _EXCEPTION:
+        for suggestion in discovery_result.get("suggestions", []):
+            history_tracker.record_discovery(
+                suggestion.get("name", ""),
+                suggestion.get("source", "github_discovery"),
+                suggestion,
+            )
+    history_tracker.save_history()
+    step_results["history_tracking"] = {"status": "ok"}
+    logger.info("STEP END: History Tracking")
 
     # ── Step 2: Research loop (continuous iterations) ──
     logger.info("STEP START: Research loop")
@@ -556,8 +716,16 @@ def run_daily_maintenance() -> dict:
 
     # ── Step 5: Dashboard recommendations ──
     logger.info("STEP START: Dashboard recommendations generation")
+    # Get configured providers and discovery results for smart recommendations
+    configured_providers_list = list(key_manager.registry.get_all_providers())
+    discovery_data = step_results.get("discovery", {})
+    # Load discovery results from disk if available
+    from .discovery import load_discovery_results
+    discovery_results = load_discovery_results(config.data_dir)
     recs_result, recs_duration = _time_step(
-        generate_recommendations_json, research_data, dashboard_data
+        generate_recommendations_json,
+        research_data, dashboard_data,
+        configured_providers_list, discovery_results,
     )
     if recs_result is not _EXCEPTION:
         step_results["recommendations"] = {

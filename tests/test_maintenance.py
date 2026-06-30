@@ -22,8 +22,9 @@ from src.utils.config_validator import validate_config, _detect_typos, _detect_p
 from src.providers.base_provider import ChatMessage, ProviderError
 from src.providers.provider_factory import (
     create_provider, list_providers, get_provider_status,
-    _discover_providers, PROVIDER_MAP,
+    _discover_providers,
 )
+from src.providers.manifest import manifest_registry
 from src.providers.groq import GroqProvider
 from src.providers.openrouter import OpenRouterProvider
 from src.providers.github_models import GitHubModelsProvider
@@ -156,8 +157,8 @@ def test_provider_discovery_from_env():
     }
     with patch.dict(os.environ, env):
         _discover_providers()
-        assert "together" in PROVIDER_MAP
-        assert "fireworks" in PROVIDER_MAP
+        assert "together" in manifest_registry
+        assert "fireworks" in manifest_registry
 
     # Verify they produce usable provider instances
     p = create_provider("together")

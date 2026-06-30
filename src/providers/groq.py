@@ -6,6 +6,7 @@ Default model: llama-3.3-70b-versatile
 """
 
 from .base_provider import BaseProvider
+from .manifest import ProviderManifest
 
 
 class GroqProvider(BaseProvider):
@@ -25,3 +26,21 @@ class GroqProvider(BaseProvider):
 
     def get_default_model(self) -> str:
         return "llama-3.3-70b-versatile"
+
+    def get_manifest(self) -> ProviderManifest:
+        return ProviderManifest(
+            provider_id="groq",
+            display_name="Groq",
+            adapter="builtin",
+            supported_models=[
+                "llama-3.3-70b-versatile",
+                "llama-3.1-8b-instant",
+                "mixtral-8x7b-32768",
+                "gemma2-9b-it",
+            ],
+            capabilities=["fast_inference", "reasoning", "coding"],
+            priority=1,
+            health="unknown",
+            endpoint="https://api.groq.com/openai/v1/chat/completions",
+            default_model="llama-3.3-70b-versatile",
+        )

@@ -1,7 +1,7 @@
 """Plugin loader for AI Key Pool.
 
 Discovers and loads provider plugins automatically.
-Supports both built-in providers and generic OpenAI-compatible adapters.
+Uses the ManifestRegistry for dynamic provider discovery.
 """
 
 import os
@@ -9,6 +9,7 @@ from typing import Optional
 
 from ..base_provider import BaseProvider
 from ..plugins.generic_openai import GenericOpenAIProvider
+from ..manifest import manifest_registry, ProviderManifest
 from ...utils.logger import get_logger
 
 
@@ -30,6 +31,9 @@ OPENAI_COMPATIBLE = {
     "cerebras",
     "deepinfra",
     "openai",
+    "sambanova",
+    "novita",
+    "chutes",
 }
 
 # Providers that are NOT OpenAI-compatible (require dedicated plugins)
@@ -43,7 +47,7 @@ def load_plugins(provider_names: list[str]) -> dict[str, type[BaseProvider]]:
 
     For each provider name:
     - If a built-in adapter exists, use it
-    - If the provider is known OpenAI-compatible, use GenericOpenAIProvider
+    - If the provider is in the manifest registry, use its adapter
     - Otherwise, check for AIKEYPOOL_PROVIDER_<NAME>_ENDPOINT env var
       and use GenericOpenAIProvider if found
     - If nothing works, log a warning and skip
@@ -75,20 +79,34 @@ def load_plugins(provider_names: list[str]) -> dict[str, type[BaseProvider]]:
             logger.info("PLUGIN: Loaded built-in adapter for %s", name_lower)
             continue
 
-        # 2. Check if OpenAI-compatible via known list
+        # 2. Check manifest registry
+        manifest = manifest_registry.get(name_lower)
+        if manifest:
+            if manifest.adapter == "builtin":
+                # Should be in builtin_map, but handle gracefully
+                logger.info("PLUGIN: Loaded builtin adapter for %s (from manifest)", name_lower)
+            elif manifest.adapter == "generic":
+                loaded[name_lower] = _make_generic_factory(name_lower)
+                logger.info("PLUGIN: Loaded generic OpenAI adapter for %s (from manifest)", name_lower)
+                continue
+            else:
+                logger.info("PLUGIN: Loaded adapter %s for %s (from manifest)", manifest.adapter, name_lower)
+                continue
+
+        # 3. Check if OpenAI-compatible via known list
         if name_lower in OPENAI_COMPATIBLE:
             loaded[name_lower] = _make_generic_factory(name_lower)
             logger.info("PLUGIN: Loaded generic OpenAI adapter for %s", name_lower)
             continue
 
-        # 3. Check for custom endpoint in environment
+        # 4. Check for custom endpoint in environment
         endpoint_key = f"AIKEYPOOL_PROVIDER_{name.upper()}_ENDPOINT"
         if os.environ.get(endpoint_key):
             loaded[name_lower] = _make_generic_factory(name_lower)
             logger.info("PLUGIN: Loaded generic adapter for %s (custom endpoint)", name_lower)
             continue
 
-        # 4. Check if provider has keys but no adapter
+        # 5. Check if provider has keys but no adapter
         keys_key = f"AIKEYPOOL_PROVIDER_{name.upper()}_KEYS"
         if os.environ.get(keys_key):
             if name_lower not in NOT_OPENAI_COMPATIBLE:
@@ -114,31 +132,8 @@ def _make_generic_factory(provider_name: str):
         provider_name: Provider name
 
     Returns:
-        Factory class that creates GenericOpenAIProvider instances
+        GenericOpenAIProvider class
     """
-    class _Factory:
-        def __init__(self, **kwargs):
-            self._name = provider_name
-
-        def get_provider_name(self):
-            return provider_name
-
-        def get_endpoint(self):
-            return GenericOpenAIProvider(provider_name).get_endpoint()
-
-        def get_auth_headers(self, api_key):
-            return GenericOpenAIProvider(provider_name).get_auth_headers(api_key)
-
-        def chat(self, api_key, model, messages):
-            return GenericOpenAIProvider(provider_name).chat(api_key, model, messages)
-
-        def health_check(self, api_key, model=None):
-            return GenericOpenAIProvider(provider_name).health_check(api_key, model)
-
-    # Make it look like the provider class for isinstance checks
-    _Factory.__name__ = f"GenericOpenAI_{provider_name}"
-    _Factory.__qualname__ = f"GenericOpenAI_{provider_name}"
-
     return GenericOpenAIProvider
 
 
@@ -149,13 +144,16 @@ def get_plugin_providers() -> dict[str, str]:
         Dict mapping provider name -> status string
         ("builtin", "generic", "detected", "missing")
     """
-    from ..provider_factory import PROVIDER_MAP
+    from ..provider_factory import manifest_registry
 
     statuses = {}
 
-    # Check built-in
-    for name in PROVIDER_MAP:
-        statuses[name] = "builtin"
+    # Check manifest registry first
+    for name, manifest in manifest_registry.get_all().items():
+        if manifest.adapter == "builtin":
+            statuses[name] = "builtin"
+        else:
+            statuses[name] = "generic"
 
     # Check environment for additional providers
     for key, value in os.environ.items():

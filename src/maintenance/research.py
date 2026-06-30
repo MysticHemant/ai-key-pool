@@ -18,6 +18,11 @@ from bs4 import BeautifulSoup
 from ..key_pool import KeyRotator, KeyManager
 from ..providers.base_provider import ChatMessage
 from ..providers.provider_factory import create_provider
+from ..providers.capability_router import CapabilityRouter
+from ..providers.fallback_chain import FallbackChain, create_fallback_chain
+from ..providers.manifest import manifest_registry
+from .agents import MultiAgentOrchestrator, AgentRole
+from .report_sections import build_executive_report
 from ..utils.config import Config
 from ..utils.logger import get_logger
 
@@ -528,29 +533,36 @@ def _llm_summarize(
     config: Config,
     key_manager: KeyManager,
     runtime_state: dict = None,
+    use_multi_agent: bool = False,
 ) -> Optional[dict]:
     """Use the configured AI provider to summarize raw findings.
 
-    Handles rate limits with exponential backoff. Skips gracefully
-    on exhaustion. Sends only essential state to reduce token usage.
+    Uses capability-based routing to select the best provider for reasoning.
+    Optionally uses multi-agent pipeline for comprehensive analysis.
+    Falls back to configured active provider if no capability-matched provider.
 
     Args:
         raw_findings: Deduplicated raw findings from web sources
         config: System configuration
         key_manager: Key manager instance
         runtime_state: Optional dict with iterative runtime state
+        use_multi_agent: If True, use multi-agent pipeline instead of single LLM
 
     Returns:
         Parsed JSON dict from LLM, or None on failure
     """
-    rotator = KeyRotator(config, key_manager)
-    provider_name = config.active_provider
+    # Use multi-agent pipeline if enabled
+    if use_multi_agent and len(raw_findings) > 5:
+        logger.info("RESEARCH: Using multi-agent pipeline for %d findings", len(raw_findings))
+        orchestrator = MultiAgentOrchestrator(config, key_manager)
+        agent_results = orchestrator.run_research_pipeline(raw_findings, runtime_state)
 
-    try:
-        provider = create_provider(provider_name)
-    except ValueError as e:
-        logger.error("Cannot summarize — invalid provider: %s", e)
-        return None
+        if agent_results["success_count"] > 0:
+            # Convert agent results to standard findings format
+            return _convert_agent_results_to_findings(agent_results, raw_findings)
+
+    # Single-agent path (original behavior with fallback chain)
+    fallback = create_fallback_chain(config, key_manager)
 
     # Build compact context from raw findings (limit to 30 items)
     context_lines = []
@@ -611,18 +623,65 @@ def _llm_summarize(
         ChatMessage(role="user", content=f"{RESEARCH_PROMPT}\n\n{user_prompt}"),
     ]
 
-    model = provider.get_default_model()
-    logger.info("RESEARCH: Using provider=%s model=%s", provider_name, model)
-
+    # Use fallback chain for reliable execution
     def request_fn(api_key: str):
+        # Find a provider for reasoning
+        provider_manifest = fallback.router.get_healthy_provider_for_capability("reasoning")
+        if provider_manifest:
+            provider = create_provider(provider_manifest.provider_id)
+        else:
+            provider = create_provider(config.active_provider)
+        model = provider.get_default_model()
         return provider.chat(api_key, model, messages)
 
-    # Execute with rate limit handling
-    result = _execute_with_rate_limit_retry(rotator, provider_name, request_fn, config)
+    # Deterministic fallback
+    def deterministic_fallback():
+        return {
+            "findings": [],
+            "summary": "LLM summarization failed — using deterministic fallback",
+            "new_providers": [],
+            "new_models": [],
+            "pricing_changes": [],
+            "free_tier_changes": [],
+            "breaking_changes": [],
+            "evaluation": {
+                "coverage": 0,
+                "verification": 0,
+                "source_diversity": 0,
+                "novel_information": 0,
+                "contradictions_resolved": 0,
+                "overall_quality": 0,
+                "reason": "LLM failed, deterministic fallback used",
+                "verified_claims": [],
+                "unverified_claims": [],
+                "resolved_questions": [],
+                "open_questions": [],
+                "research_queue": [],
+                "contradictions": [],
+                "completed_topics": [],
+                "assumptions": [],
+            },
+        }
 
-    if not result.success or not result.response:
-        logger.error("LLM summarization failed: %s", result.error)
-        return None
+    result = fallback.execute_with_fallback(
+        capability="reasoning",
+        request_fn=request_fn,
+        deterministic_fn=deterministic_fallback,
+        max_retries_per_provider=1,
+    )
+
+    if not result.success:
+        logger.error("LLM summarization failed after all attempts: %s", result.error)
+        return deterministic_fallback()
+
+    if result.deterministic_fallback:
+        logger.info("LLM summarization used deterministic fallback")
+        return result.response
+
+    logger.info(
+        "RESEARCH: Using provider=%s (fallback chain, %d attempts)",
+        result.provider_used, len(result.attempts),
+    )
 
     parsed = _parse_findings(result.response.content)
 
@@ -637,6 +696,85 @@ def _llm_summarize(
         logger.info("======================")
 
     return parsed
+
+
+def _convert_agent_results_to_findings(agent_results: dict, raw_findings: list[dict]) -> dict:
+    """Convert multi-agent results to standard findings format.
+
+    Args:
+        agent_results: Consolidated agent results
+        raw_findings: Original raw findings
+
+    Returns:
+        Dict in standard findings format
+    """
+    findings = []
+
+    # Convert consolidated findings
+    for item in agent_results.get("consolidated_findings", []):
+        if isinstance(item, dict):
+            findings.append({
+                "provider": item.get("provider", "unknown"),
+                "model": item.get("model"),
+                "description": item.get("description", item.get("title", "")),
+                "url": item.get("url", item.get("source_url", "")),
+                "type": item.get("type", "announcement"),
+                "action": item.get("action", "monitor"),
+                "confidence": item.get("confidence", "medium"),
+            })
+
+    # Add verified claims as findings
+    for claim in agent_results.get("verified_claims", []):
+        if isinstance(claim, dict):
+            findings.append({
+                "provider": claim.get("provider", "unknown"),
+                "model": None,
+                "description": claim.get("claim", claim.get("description", "")),
+                "url": claim.get("source", claim.get("url", "")),
+                "type": "verification",
+                "action": "update",
+                "confidence": claim.get("confidence", "high"),
+            })
+
+    # If no findings from agents, convert raw findings
+    if not findings:
+        for rf in raw_findings[:20]:
+            findings.append({
+                "provider": rf.get("provider", "unknown"),
+                "model": None,
+                "description": rf.get("title", ""),
+                "url": rf.get("source_url", ""),
+                "type": "announcement",
+                "action": "monitor",
+                "confidence": "medium",
+            })
+
+    return {
+        "findings": findings,
+        "summary": agent_results.get("executive_summary", "Multi-agent research completed"),
+        "new_providers": [],
+        "new_models": [],
+        "pricing_changes": [],
+        "free_tier_changes": [],
+        "breaking_changes": [],
+        "evaluation": {
+            "coverage": 70,
+            "verification": 60,
+            "source_diversity": 60,
+            "novel_information": 60,
+            "contradictions_resolved": 50,
+            "overall_quality": 65,
+            "reason": f"Multi-agent pipeline: {agent_results['success_count']}/{agent_results['total_count']} agents succeeded",
+            "verified_claims": agent_results.get("verified_claims", []),
+            "unverified_claims": [],
+            "resolved_questions": [],
+            "open_questions": agent_results.get("open_questions", []),
+            "research_queue": [],
+            "contradictions": agent_results.get("contradictions", []),
+            "completed_topics": [],
+            "assumptions": [],
+        },
+    }
 
 
 def _execute_with_rate_limit_retry(rotator, provider_name, request_fn, config, max_rate_limit_retries=3):
@@ -757,6 +895,7 @@ def research_providers(
     key_manager: KeyManager,
     history_path: Path,
     runtime_state: dict = None,
+    use_multi_agent: bool = False,
 ) -> dict:
     """Run provider research using real web data.
 
@@ -764,6 +903,7 @@ def research_providers(
     1. Collect data from official public sources (web pages + RSS).
     2. Deduplicate findings.
     3. Send to configured LLM for summarization and recommendations.
+       Optionally uses multi-agent pipeline for comprehensive analysis.
     4. Save to history.
 
     On any failure, returns previous history or empty result.
@@ -774,6 +914,7 @@ def research_providers(
         key_manager: Key manager instance
         history_path: Path to research_history.json
         runtime_state: Optional dict with iterative runtime state
+        use_multi_agent: If True, use multi-agent pipeline
 
     Returns:
         Research findings dict with 'findings', 'summary', etc.
@@ -796,7 +937,7 @@ def research_providers(
         logger.info("STEP START: LLM summarization of %d findings", len(raw_findings))
         llm_start = time.monotonic()
         try:
-            summarized = _llm_summarize(raw_findings, config, key_manager, runtime_state)
+            summarized = _llm_summarize(raw_findings, config, key_manager, runtime_state, use_multi_agent)
         except Exception as e:
             logger.error("LLM summarization failed: %s", e)
             summarized = None
@@ -844,6 +985,7 @@ def research_providers(
         "findings": findings_result,
         "raw_count": len(raw_findings),
         "has_llm_summary": summarized is not None,
+        "multi_agent": use_multi_agent,
     }
     history["entries"].append(entry)
     history["entries"] = history["entries"][-30:]  # Keep last 30 days
@@ -851,9 +993,10 @@ def research_providers(
 
     total_findings = len(findings_result.get("findings", []))
     logger.info(
-        "Research complete — %d findings, llm=%s, history=%d entries",
+        "Research complete — %d findings, llm=%s, multi_agent=%s, history=%d entries",
         total_findings,
         "yes" if summarized else "no",
+        "yes" if use_multi_agent else "no",
         len(history["entries"]),
     )
 
@@ -988,8 +1131,8 @@ def _normalize_research_result(res: dict) -> dict:
 def generate_research_plan(config: Config, key_manager: KeyManager, runtime_state: dict) -> dict:
     """Generate a structured research plan before research begins using the LLM.
 
-    Reuses the previous plan if nothing significant changed (no new contradictions,
-    questions, or queue changes). Handles rate limits gracefully.
+    Uses fallback chain for reliable execution.
+    Reuses the previous plan if nothing significant changed.
 
     Args:
         config: System configuration
@@ -1024,13 +1167,7 @@ Respond ONLY with JSON:
   "expected_deliverables": ["deliverable 1"]
 }}"""
 
-    rotator = KeyRotator(config, key_manager)
-    provider_name = config.active_provider
-    try:
-        provider = create_provider(provider_name)
-    except Exception as e:
-        logger.error("Cannot create provider for planning: %s", e)
-        return _default_plan()
+    fallback = create_fallback_chain(config, key_manager)
 
     # Build compact prompt — only essential state
     unverified = runtime_state.get("unverified_claims", [])
@@ -1051,18 +1188,29 @@ Respond ONLY with JSON:
         ChatMessage(role="system", content="Research planner. Respond only with valid JSON."),
         ChatMessage(role="user", content=formatted_prompt),
     ]
-    model = provider.get_default_model()
 
-    logger.info("PLANNER: Generating plan for iteration %d using %s", iteration, provider_name)
+    logger.info("PLANNER: Generating plan for iteration %d (fallback chain)", iteration)
 
+    # Use fallback chain
     def request_fn(api_key: str):
+        provider_manifest = fallback.router.get_healthy_provider_for_capability("reasoning")
+        if provider_manifest:
+            provider = create_provider(provider_manifest.provider_id)
+        else:
+            provider = create_provider(config.active_provider)
+        model = provider.get_default_model()
         return provider.chat(api_key, model, messages)
 
-    # Execute with rate limit handling
-    result = _execute_with_rate_limit_retry(rotator, provider_name, request_fn, config)
-    if not result.success or not result.response:
-        logger.error("LLM planner failed: %s", result.error)
-        return _default_plan()
+    result = fallback.execute_with_fallback(
+        capability="reasoning",
+        request_fn=request_fn,
+        deterministic_fn=_default_plan,
+        max_retries_per_provider=1,
+    )
+
+    if not result.success or result.deterministic_fallback:
+        logger.warning("LLM planner failed or used fallback")
+        return _default_plan() if not result.deterministic_fallback else result.response
 
     parsed = _parse_findings(result.response.content)
     if parsed:
@@ -1128,7 +1276,7 @@ def _default_plan() -> dict:
 def compress_memory(config: Config, key_manager: KeyManager, runtime_state: dict) -> str:
     """Summarize older iterations to keep working memory small while preserving knowledge.
 
-    Handles rate limits gracefully — returns existing memory on failure.
+    Uses fallback chain for reliable execution.
     """
     iteration = runtime_state.get("iteration", 1)
     threshold = config.memory_compression_threshold
@@ -1165,13 +1313,7 @@ Iterations to consolidate:
 
 Respond with the consolidated summary."""
 
-    rotator = KeyRotator(config, key_manager)
-    provider_name = config.active_provider
-    try:
-        provider = create_provider(provider_name)
-    except Exception as e:
-        logger.error("Cannot create provider for memory compression: %s", e)
-        return current_ltm
+    fallback = create_fallback_chain(config, key_manager)
 
     messages = [
         ChatMessage(role="system", content="Knowledge consolidation. Respond only with markdown summary."),
@@ -1180,17 +1322,27 @@ Respond with the consolidated summary."""
             combined_older=combined_older[:3000],
         )),
     ]
-    model = provider.get_default_model()
 
     logger.info("MEMORY COMPRESSOR: Consolidating iterations 1 to %d into Long-Term Memory", compress_limit)
 
+    # Use fallback chain
     def request_fn(api_key: str):
+        provider_manifest = fallback.router.get_healthy_provider_for_capability("reasoning")
+        if provider_manifest:
+            provider = create_provider(provider_manifest.provider_id)
+        else:
+            provider = create_provider(config.active_provider)
+        model = provider.get_default_model()
         return provider.chat(api_key, model, messages)
 
-    # Execute with rate limit handling
-    result = _execute_with_rate_limit_retry(rotator, provider_name, request_fn, config)
-    if not result.success or not result.response:
-        logger.error("Memory consolidation failed: %s", result.error)
+    result = fallback.execute_with_fallback(
+        capability="reasoning",
+        request_fn=request_fn,
+        max_retries_per_provider=1,
+    )
+
+    if not result.success:
+        logger.error("Memory consolidation failed after all attempts")
         return current_ltm
 
     return result.response.content.strip()
@@ -1199,8 +1351,20 @@ Respond with the consolidated summary."""
 def generate_final_report(config: Config, key_manager: KeyManager, runtime_state: dict) -> dict:
     """Consolidate all iteration findings into a polished final report.
 
-    Uses structured findings (JSON) instead of raw markdown concatenation.
-    LLM only writes the narrative — data compilation is done deterministically.
+    Uses the new executive report structure with:
+    - Executive Summary
+    - Top 5 Industry Developments
+    - Highest Business Impact
+    - New Models Released
+    - Provider Comparison
+    - Verified Findings
+    - Contradictions
+    - Open Questions
+    - Action Items
+    - Suggested Providers to Add
+    - Current Provider Health
+    - Research Statistics
+
     Falls back to deterministic report generation if LLM fails.
 
     Args:
@@ -1238,8 +1402,20 @@ def generate_final_report(config: Config, key_manager: KeyManager, runtime_state
     quality_metrics = runtime_state.get("quality_metrics", {})
     history = runtime_state.get("history", [])
 
-    # Step 4: Build deterministic report sections
-    sections = _build_report_sections(
+    # Get configured providers for smart recommendations
+    configured_providers = list(key_manager.registry.get_all_providers())
+
+    # Get discovery results
+    from .discovery import load_discovery_results
+    discovery_results = load_discovery_results(config.data_dir)
+
+    # Get provider health
+    provider_health = {}
+    for manifest in manifest_registry.get_all().values():
+        provider_health[manifest.provider_id] = manifest.health
+
+    # Step 4: Build new executive report sections
+    sections = build_executive_report(
         merged_findings=merged_findings,
         verified_claims=verified_claims,
         unverified_claims=unverified_claims,
@@ -1249,6 +1425,9 @@ def generate_final_report(config: Config, key_manager: KeyManager, runtime_state
         quality_metrics=quality_metrics,
         history=history,
         iteration=iteration,
+        configured_providers=configured_providers,
+        discovery_results=discovery_results,
+        provider_health=provider_health,
     )
 
     # Step 5: Try LLM narrative generation (optional enhancement)
@@ -1499,8 +1678,8 @@ def _llm_generate_narrative(
 ) -> Optional[str]:
     """Use LLM to write a polished narrative from deterministic sections.
 
-    This is an OPTIONAL enhancement. If it fails, the deterministic
-    executive_summary is used instead.
+    Uses fallback chain for reliable execution.
+    Falls back to deterministic summary on failure.
 
     Args:
         sections: Deterministic report sections
@@ -1511,14 +1690,7 @@ def _llm_generate_narrative(
     Returns:
         Polished narrative string, or None on failure
     """
-    rotator = KeyRotator(config, key_manager)
-    provider_name = config.active_provider
-
-    try:
-        provider = create_provider(provider_name)
-    except ValueError as e:
-        logger.error("Cannot create provider for narrative: %s", e)
-        return None
+    fallback = create_fallback_chain(config, key_manager)
 
     # Build a compact prompt with structured data (not raw markdown)
     prompt_data = {
@@ -1547,14 +1719,24 @@ Be specific with provider names and details. Write in a professional, concise st
         ChatMessage(role="user", content=narrative_prompt),
     ]
 
-    model = provider.get_default_model()
-
+    # Use fallback chain
     def request_fn(api_key: str):
+        provider_manifest = fallback.router.get_healthy_provider_for_capability("reasoning")
+        if provider_manifest:
+            provider = create_provider(provider_manifest.provider_id)
+        else:
+            provider = create_provider(config.active_provider)
+        model = provider.get_default_model()
         return provider.chat(api_key, model, messages)
 
-    result = _execute_with_rate_limit_retry(rotator, provider_name, request_fn, config)
-    if not result.success or not result.response:
-        logger.error("LLM narrative generation failed: %s", result.error)
+    result = fallback.execute_with_fallback(
+        capability="reasoning",
+        request_fn=request_fn,
+        max_retries_per_provider=1,
+    )
+
+    if not result.success:
+        logger.error("LLM narrative generation failed after all attempts")
         return None
 
     narrative = result.response.content.strip()

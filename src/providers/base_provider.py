@@ -42,8 +42,9 @@ class BaseProvider(ABC):
     """Abstract base for all AI provider adapters.
 
     Subclasses must implement get_provider_name(), get_endpoint(),
-    get_auth_headers(), and get_default_model(). The chat() and
-    health_check() methods are concrete and use these abstract methods.
+    get_auth_headers(), get_default_model(), and get_manifest().
+    The chat() and health_check() methods are concrete and use these
+    abstract methods.
     """
 
     @abstractmethod
@@ -69,6 +70,14 @@ class BaseProvider(ABC):
         Each provider returns its own supported default model.
         Research and health checks use this model unless overridden.
         """
+
+    def get_manifest(self):
+        """Return ProviderManifest for this provider.
+
+        Subclasses should override this to provide manifest metadata.
+        Default implementation returns None (manifest will be auto-generated).
+        """
+        return None
 
     def chat(self, api_key: str, model: str, messages: list[ChatMessage]) -> ChatResponse:
         """Send a chat completion request.

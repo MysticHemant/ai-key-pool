@@ -6,6 +6,7 @@ Default model: gpt-4.1-mini
 """
 
 from .base_provider import BaseProvider
+from .manifest import ProviderManifest
 
 
 class GitHubModelsProvider(BaseProvider):
@@ -27,3 +28,23 @@ class GitHubModelsProvider(BaseProvider):
 
     def get_default_model(self) -> str:
         return "gpt-4.1-mini"
+
+    def get_manifest(self) -> ProviderManifest:
+        return ProviderManifest(
+            provider_id="github_models",
+            display_name="GitHub Models",
+            adapter="builtin",
+            supported_models=[
+                "gpt-4.1-mini",
+                "gpt-4.1",
+                "gpt-4o",
+                "gpt-4o-mini",
+                "claude-3.5-sonnet",
+                "phi-3-medium-128k-instruct",
+            ],
+            capabilities=["reasoning", "coding"],
+            priority=3,
+            health="unknown",
+            endpoint="https://models.github.ai/inference/chat/completions",
+            default_model="gpt-4.1-mini",
+        )

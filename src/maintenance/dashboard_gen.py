@@ -146,21 +146,38 @@ def generate_status_json(
 def generate_recommendations_json(
     research_data: dict,
     output_path: Path,
+    configured_providers: list[str] = None,
+    discovery_results: dict = None,
 ) -> None:
     """Write recommendations.json for the dashboard.
 
     Produces an action-oriented report grouped by priority level.
     Only includes findings that have a concrete action or are breaking changes.
+    Never recommends providers already configured.
 
     Args:
         research_data: Research findings from daily research
         output_path: Path to dashboard/data/ directory
+        configured_providers: List of already-configured provider names
+        discovery_results: Optional discovery results dict
     """
     findings = research_data.get("findings", [])
+    configured_set = set(configured_providers or [])
+
+    # Filter out findings for already-configured providers
+    filtered_findings = []
+    for f in findings:
+        provider = f.get("provider", "").lower()
+        action = f.get("action", "")
+        # Never recommend adding a configured provider
+        if provider in configured_set and action in ("add_provider", "add_key"):
+            logger.info("RECOMMENDATIONS: Skipping %s (already configured)", provider)
+            continue
+        filtered_findings.append(f)
 
     # Enrich and classify each finding
     enriched_findings = []
-    for f in findings:
+    for f in filtered_findings:
         priority = _classify_priority(f)
         enriched_findings.append({
             "provider": f.get("provider", ""),
@@ -195,24 +212,39 @@ def generate_recommendations_json(
     # Derive lists from findings if not explicitly provided (backward compat)
     new_providers = research_data.get("new_providers") or [
         f.get("name", f.get("provider", ""))
-        for f in findings if f.get("type") == "provider"
+        for f in filtered_findings if f.get("type") == "provider"
     ]
     new_models = research_data.get("new_models") or [
         f.get("name", f.get("model", ""))
-        for f in findings if f.get("type") == "model"
+        for f in filtered_findings if f.get("type") == "model"
     ]
     pricing_changes = research_data.get("pricing_changes") or [
         f.get("description", f.get("name", ""))
-        for f in findings if f.get("type") == "pricing"
+        for f in filtered_findings if f.get("type") == "pricing"
     ]
     free_tier_changes = research_data.get("free_tier_changes") or [
         f.get("description", f.get("name", ""))
-        for f in findings if f.get("type") == "free_tier"
+        for f in filtered_findings if f.get("type") == "free_tier"
     ]
     breaking_changes = research_data.get("breaking_changes") or [
         f.get("description", f.get("name", ""))
-        for f in findings if f.get("type") in ("deprecation", "breaking")
+        for f in filtered_findings if f.get("type") in ("deprecation", "breaking")
     ]
+
+    # Build suggested providers from discovery (exclude configured)
+    suggested_providers = []
+    if discovery_results:
+        for suggestion in discovery_results.get("suggestions", []):
+            name = suggestion.get("name", "").lower()
+            if name and name not in configured_set:
+                suggested_providers.append({
+                    "name": suggestion.get("display_name", name),
+                    "endpoint": suggestion.get("endpoint", ""),
+                    "models": suggestion.get("models", []),
+                    "free_tier": suggestion.get("free_tier", False),
+                    "source": suggestion.get("source", ""),
+                    "confidence": suggestion.get("confidence", "medium"),
+                })
 
     recommendations = {
         "research_date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
@@ -223,6 +255,8 @@ def generate_recommendations_json(
         "pricing_changes": pricing_changes,
         "free_tier_changes": free_tier_changes,
         "breaking_changes": breaking_changes,
+        "suggested_providers": suggested_providers,
+        "configured_providers": sorted(configured_set),
         "summary": research_data.get("summary", "No research data"),
     }
 
@@ -230,8 +264,8 @@ def generate_recommendations_json(
     with open(output_path / "recommendations.json", "w") as f:
         json.dump(recommendations, f, indent=2)
 
-    logger.info("Generated recommendations.json — %d findings, %d action items",
-                len(findings), len(action_items))
+    logger.info("Generated recommendations.json — %d findings, %d action items, %d suggested providers",
+                len(filtered_findings), len(action_items), len(suggested_providers))
 
 
 def _classify_priority(finding: dict) -> str:

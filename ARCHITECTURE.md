@@ -14,14 +14,18 @@ A complete guide to understanding the AI Key Pool system.
 6. [Daily Maintenance Lifecycle](#6-daily-maintenance-lifecycle)
 7. [Dashboard Generation Lifecycle](#7-dashboard-generation-lifecycle)
 8. [Provider Integration Architecture](#8-provider-integration-architecture)
-9. [Security Model](#9-security-model)
-10. [Configuration Model](#10-configuration-model)
-11. [GitHub Actions Workflows](#11-github-actions-workflows)
-12. [Deployment Guide](#12-deployment-guide)
-13. [Sequence Diagrams](#13-sequence-diagrams)
-14. [Extension Guide](#14-extension-guide)
-15. [Known Limitations](#15-known-limitations)
-16. [Future Roadmap](#16-future-roadmap)
+9. [Dynamic Provider System](#9-dynamic-provider-system)
+10. [Multi-Agent Research](#10-multi-agent-research)
+11. [Provider Discovery](#11-provider-discovery)
+12. [Historical Intelligence](#12-historical-intelligence)
+13. [Security Model](#13-security-model)
+14. [Configuration Model](#14-configuration-model)
+15. [GitHub Actions Workflows](#15-github-actions-workflows)
+16. [Deployment Guide](#16-deployment-guide)
+17. [Sequence Diagrams](#17-sequence-diagrams)
+18. [Extension Guide](#18-extension-guide)
+19. [Known Limitations](#19-known-limitations)
+20. [Future Roadmap](#20-future-roadmap)
 
 ---
 
@@ -81,18 +85,29 @@ ai-key-pool/
 │   │   ├── __init__.py              # Exports: HealthChecker, KeyHealth, HealthStatus
 │   │   └── health_checker.py        # Consecutive failure tracking, health states
 │   │
+│   ├── startup/                     # Initialization and key loading
+│   │   ├── __init__.py              # Exports: load_provider_keys, get_configured_providers
+│   │   └── key_loader.py            # AIKEYPOOL_PROVIDER_KEYS JSON support
+│   │
 │   ├── utils/
 │   │   ├── __init__.py              # Exports: Config, load_config, get_logger
 │   │   ├── config.py                # Env-var config, ProviderConfig, load_config()
 │   │   └── logger.py                # Structured logging, event helpers
 │   │
-│   ├── providers/                   # Provider adapters (requires httpx)
-│   │   ├── __init__.py
+│   ├── providers/                   # Provider adapters and dynamic system
+│   │   ├── __init__.py              # Exports: manifest_registry, CapabilityRouter, FallbackChain
 │   │   ├── base_provider.py         # BaseProvider ABC, ChatMessage, ChatResponse, ProviderError
+│   │   ├── manifest.py              # ProviderManifest, ManifestRegistry (global singleton)
+│   │   ├── capability_router.py     # Capability-based routing across providers
+│   │   ├── fallback_chain.py        # 3-phase fallback with deterministic fallback
 │   │   ├── github_models.py         # GitHub Models adapter (models.github.ai)
 │   │   ├── groq.py                  # Groq adapter (api.groq.com)
 │   │   ├── openrouter.py            # OpenRouter adapter (openrouter.ai)
-│   │   └── provider_factory.py      # create_provider(), list_providers()
+│   │   ├── provider_factory.py      # create_provider(), list_providers()
+│   │   └── plugins/                 # Plugin system for generic providers
+│   │       ├── __init__.py
+│   │       ├── generic_openai.py    # OpenAI-compatible adapter
+│   │       └── loader.py            # Plugin discovery and loading
 │   │
 │   ├── api/                         # HTTP service (requires fastapi, uvicorn)
 │   │   ├── __init__.py
@@ -101,12 +116,16 @@ ai-key-pool/
 │   │   ├── models.py                # Pydantic request/response schemas
 │   │   └── routes.py                # API endpoints
 │   │
-│   └── maintenance/                 # Daily automation
+│   └── maintenance/                 # Daily automation and intelligence
 │       ├── __init__.py
-│       ├── orchestrator.py          # 5-step daily cycle
-│       ├── research.py              # AI research via KeyRotator
+│       ├── orchestrator.py          # Multi-step daily cycle with research loop
+│       ├── research.py              # AI research via KeyRotator + fallback chain
 │       ├── email_sender.py          # SMTP daily summary
-│       └── dashboard_gen.py         # Writes status.json + recommendations.json
+│       ├── dashboard_gen.py         # Writes status.json + recommendations.json
+│       ├── agents.py                # Multi-agent research (6 roles)
+│       ├── discovery.py             # GitHub provider discovery
+│       ├── history_tracker.py       # Historical intelligence tracking
+│       └── report_sections.py       # Executive report with 12 sections
 │
 ├── dashboard/                       # GitHub Pages (static)
 │   ├── index.html                   # Status dashboard (dark theme, auto-refresh)
@@ -116,12 +135,20 @@ ai-key-pool/
 │       └── recommendations.json
 │
 ├── tests/
-│   ├── test_simulation.py           # 7 core engine tests
-│   └── test_mvp.py                  # 10 full-stack tests (providers, API, dashboard)
+│   ├── test_mvp.py                  # 10 full-stack tests (providers, API, dashboard)
+│   ├── test_maintenance.py          # 40+ tests (maintenance, providers, startup)
+│   ├── test_manifest.py             # Manifest registry tests
+│   ├── test_capability_router.py    # Capability routing tests
+│   ├── test_fallback_chain.py       # Fallback chain tests
+│   ├── test_agents.py               # Multi-agent research tests
+│   ├── test_discovery.py            # Provider discovery tests
+│   └── test_history_tracker.py      # History tracking tests
 │
 ├── data/                            # Runtime state (gitignored)
 │   ├── key_registry.json            # Key entries and statuses
-│   └── key_health.json              # Health records
+│   ├── key_health.json              # Health records
+│   ├── intelligence_history.json    # Historical intelligence tracking
+│   └── discovery_results.json       # Latest provider discovery results
 │
 ├── .github/workflows/
 │   ├── daily-maintenance.yml        # Cron: research + email + dashboard
@@ -159,22 +186,30 @@ ai-key-pool/
          └────────┬────────┘                 │
                   │                          │
            ┌──────▼───────┐          ┌───────▼───────┐
-           │ key_manager  │          │ provider_     │
-           │    .py       │          │  factory.py   │
-           └──────┬───────┘          └───────────────┘
-                  │
-           ┌──────▼───────┐
-           │ key_rotator  │
-           │    .py       │
-           └──────┬───────┘
-                  │
-    ┌─────────────┼─────────────┐
-    │             │             │
-┌───▼───┐  ┌─────▼─────┐ ┌────▼────┐
-│routes │  │orchestrat  │ │research │
-│  .py  │  │  or.py     │ │  .py    │
-└───┬───┘  └─────┬─────┘ └─────────┘
+           │ key_manager  │          │  manifest.py  │
+           │    .py       │          │ (global       │
+           └──────┬───────┘          │  singleton)   │
+                  │                  └───────┬───────┘
+           ┌──────▼───────┐                 │
+           │ key_rotator  │    ┌─────────────┤
+           │    .py       │    │             │
+           └──────┬───────┘ ┌──▼──────────┐ ┌▼────────────────┐
+                  │         │capability_  │ │provider_factory │
+    ┌─────────────┤         │router.py    │ │   .py           │
+    │             │         └──────┬──────┘ └────────────────┘
+    │             │                │
+┌───▼───┐  ┌─────▼─────┐  ┌──────▼──────┐
+│routes │  │orchestrat  │  │fallback_    │
+│  .py  │  │  or.py     │  │chain.py     │
+└───┬───┘  └─────┬─────┘  └─────────────┘
     │            │
+    │      ┌─────┼──────────┬──────────────┐
+    │      │     │          │              │
+    │  ┌───▼──┐ ┌▼────────┐┌▼───────────┐ ┌▼──────────┐
+    │  │report│ │discovery ││history_    │ │agents.py  │
+    │  │_sects│ │  .py     ││tracker.py  │ │(6 roles)  │
+    │  └──────┘ └─────────┘└────────────┘ └───────────┘
+    │
 ┌───▼───┐  ┌────▼──────────┐
 │app.py │  │email_sender   │
 └───────┘  │  .py          │
@@ -186,6 +221,7 @@ ai-key-pool/
 **Import rules:**
 - Core engine (`key_pool/`, `health/`, `utils/`) never imports from `providers/`, `api/`, or `maintenance/`
 - `providers/` never imports from `key_pool/`, `api/`, or `maintenance/`
+- `providers/` can import from `providers/plugins/` and `providers/manifest.py`
 - `api/` imports from `key_pool/`, `providers/`, and `utils/`
 - `maintenance/` imports from `key_pool/`, `providers/`, and `utils/`
 - No circular imports exist between any layers
@@ -318,56 +354,74 @@ execute_with_rotation(provider, request_fn, max_retries)
 
 ## 6. Daily Maintenance Lifecycle
 
-The `orchestrator.run_daily_maintenance()` function runs a 5-step cycle:
+The `orchestrator.run_daily_maintenance()` function runs a multi-step daily cycle:
 
 ```
 run_daily_maintenance()
 │
-├─ Initialize: load_config(), KeyManager(data_dir)
-├─ Initialize: stats = {total_keys: 0, by_status: {}}
+├─ Initialize: load_config(), KeyManager(data_dir), RuntimeManager
+│
+├─ Step 0a: validate_config()
+├─ Step 0b: load_provider_keys(config)          ← AIKEYPOOL_PROVIDER_KEYS JSON
+├─ Step 0c: sync_provider_keys(config, registry) ← sync keys to registry
+├─ Step 0d: list_providers() + get_provider_status() ← provider discovery
+├─ Diagnostics: _log_startup_diagnostics()
 │
 ├─ Step 1: Health Check
 │  ├─ key_manager.get_all_stats()
-│  ├─ Record: total_keys, by_status
-│  └─ On error: log, append to errors[], continue
+│  └─ Record: total_keys, by_status
 │
-├─ Step 2: Generate Status Report
-│  ├─ dashboard_gen.generate_status_json(key_manager, config, dashboard/data/)
-│  │  ├─ Build status dict with active provider, key counts, timestamps
-│  │  ├─ Write dashboard/data/status.json
-│  │  └─ Log: "Generated status.json — N keys"
-│  └─ On error: log, append to errors[], continue
+├─ Step 1b: GitHub Provider Discovery
+│  ├─ discover_providers(config)     ← fetch from zukixa/cool-ai-stuff, cheahjs/free-llm-api-resources
+│  └─ save_discovery_results()       ← write to data/discovery_results.json
 │
-├─ Step 3: Run AI Research
-│  ├─ research.research_providers(config, key_manager, history_path)
-│  │  ├─ Create provider adapter for active_provider
-│  │  ├─ Build research prompt (system + user messages)
-│  │  ├─ Execute via KeyRotator (auto-rotates on quota)
-│  │  │  └─ request_fn = provider.chat(api_key, "gpt-4o-mini", messages)
-│  │  ├─ Parse JSON response into findings dict
-│  │  ├─ Merge with research_history.json (keep last 30 days)
-│  │  └─ Return: {findings: [...], summary: "..."}
-│  └─ On error: set research_data = {findings: [], summary: "Research failed"}
+├─ Step 1c: Historical Intelligence
+│  ├─ HistoryTracker.update_provider() for each provider
+│  └─ HistoryTracker.record_discovery() for new discoveries
 │
-├─ Step 4: Generate Recommendations
-│  ├─ dashboard_gen.generate_recommendations_json(research_data, dashboard/data/)
-│  │  ├─ Categorize findings: providers, free_tiers, models, changes
-│  │  ├─ Build recommendations list (high/medium priority)
-│  │  ├─ Write dashboard/data/recommendations.json
-│  │  └─ Log: "Generated recommendations.json — N findings"
-│  └─ On error: log, append to errors[], continue
+├─ Step 2: Research Loop (continuous iterations)
+│  ├─ _run_single_iteration():
+│  │  ├─ generate_research_plan()     ← AI generates targeted questions
+│  │  ├─ research_providers()         ← multi-agent research with capability routing
+│  │  │  ├─ MultiAgentOrchestrator.run_research_pipeline()
+│  │  │  │  ├─ RESEARCHER agent      ← capability routing (reasoning/coding)
+│  │  │  │  ├─ EVIDENCE_COLLECTOR    ← validates claims
+│  │  │  │  ├─ VERIFIER              ← cross-references findings
+│  │  │  │  ├─ CONTRADICTION_DETECTOR ← detects conflicts
+│  │  │  │  ├─ CRITIC                ← quality control
+│  │  │  │  └─ WRITER                ← executive summary
+│  │  │  └─ FallbackChain: capability → all providers → deterministic
+│  │  ├─ compress_memory() if needed
+│  │  └─ Queue management + repetition detection
+│  └─ Loop continues until safety limits reached
 │
-├─ Step 5: Send Email Summary
-│  ├─ Build status_data dict from stats
-│  ├─ email_sender.send_daily_summary(smtp_host, ..., status, recommendations, errors)
-│  │  ├─ Skip if SMTP not configured (returns False)
-│  │  ├─ Build HTML body with health, research, errors
-│  │  ├─ Send via SMTP with TLS
-│  │  └─ Return True/False
-│  └─ On error: log, append to errors[], continue
+├─ Step 3: Final Report
+│  └─ generate_final_report()
+│     └─ build_executive_report()     ← 12-section executive report
 │
-├─ Return: {timestamp, steps: {...}, errors: [...], status: "completed"|"completed_with_errors"}
+├─ Step 4: Dashboard Status
+│  └─ generate_status_json()
+│
+├─ Step 5: Recommendations (smart filtering)
+│  └─ generate_recommendations_json(research_data, ..., configured_providers, discovery_results)
+│     └─ Filters out findings for already-configured providers
+│     └─ Includes suggested_providers from discovery
+│
+├─ Step 6: Email Delivery
+│  └─ _do_send_email()
+│
+├─ Step 7: Archive Cycle
+│  └─ runtime_manager.archive_cycle()
+│
+├─ Write last_maintenance.json
+└─ Return: {timestamp, steps: {...}, errors: [...], status: "completed"|"completed_with_errors"}
 ```
+
+**Research loop safety limits:**
+- Max iterations: configurable (default stops when research plan is empty)
+- Max runtime: session timeout
+- Max API budget: token limit protection
+- Repetition detection: tracks previous findings to avoid loops
 
 **When invoked via GitHub Actions:**
 1. Python runs `python -m src.maintenance.orchestrator`
@@ -418,7 +472,7 @@ generate_status_json(key_manager, config, output_path)
 ### recommendations.json Generation
 
 ```
-generate_recommendations_json(research_data, output_path)
+generate_recommendations_json(research_data, output_path, configured_providers, discovery_results)
 │
 ├─ Extract findings from research_data
 │
@@ -428,9 +482,16 @@ generate_recommendations_json(research_data, output_path)
 │  ├─ new_models     = [f for f in findings if type == "model"]
 │  └─ provider_changes = [f for f in findings if type == "change"]
 │
+├─ Smart filtering:
+│  ├─ Filter out findings for already-configured providers
+│  └─ Add suggested_providers from discovery_results
+│
 ├─ Build recommendations list:
 │  └─ For each finding with action "add_key" or "monitor":
 │     {priority: "high"|"medium", action: description, reason: name}
+│
+├─ Add configured_providers section:
+│  └─ For each configured provider: {name, status, key_count}
 │
 └─ Write to output_path / "recommendations.json"
 ```
@@ -468,6 +529,7 @@ BaseProvider (ABC)
 ├── get_provider_name() → str          # "groq", "openrouter", "github_models"
 ├── get_endpoint() → str               # Full chat completions URL
 ├── get_auth_headers(api_key) → dict   # Authorization + provider-specific headers
+├── get_manifest() → ProviderManifest  # Provider capabilities and metadata
 │
 ├── chat(api_key, model, messages) → ChatResponse    # Concrete
 │  ├─ Build headers via get_auth_headers()
@@ -491,24 +553,27 @@ BaseProvider (ABC)
 
 ### Provider Adapters
 
-| Provider | Endpoint | Auth Header | Notes |
-|----------|----------|-------------|-------|
-| GitHub Models | `models.github.ai/inference/chat/completions` | Bearer + `X-GitHub-Api-Version` | Uses GitHub PAT |
-| Groq | `api.groq.com/openai/v1/chat/completions` | Bearer | Standard OpenAI format |
-| OpenRouter | `openrouter.ai/api/v1/chat/completions` | Bearer + optional `HTTP-Referer`, `X-OpenRouter-Title` | Multi-model routing |
+| Provider | Endpoint | Auth Header | Capabilities | Priority |
+|----------|----------|-------------|--------------|----------|
+| GitHub Models | `models.github.ai/inference/chat/completions` | Bearer + `X-GitHub-Api-Version` | reasoning, coding | 3 |
+| Groq | `api.groq.com/openai/v1/chat/completions` | Bearer | fast_inference, reasoning, coding | 1 |
+| OpenRouter | `openrouter.ai/api/v1/chat/completions` | Bearer + optional headers | reasoning, coding, long_context, vision | 5 |
 
-### Provider Factory
+### Provider Factory (Dynamic)
 
 ```python
-# provider_factory.py
-PROVIDER_MAP = {
-    "github_models": GitHubModelsProvider,
-    "groq": GroqProvider,
-    "openrouter": OpenRouterProvider,
-}
+# provider_factory.py — no hardcoded PROVIDER_MAP
+def create_provider(provider_name: str, **kwargs) -> BaseProvider
+    # 1. Check builtin adapters (GitHub Models, Groq, OpenRouter)
+    # 2. Check manifest registry for generic providers
+    # 3. Fall back to env var discovery
+    # Raises ValueError if unknown
 
-create_provider("groq")  # → GroqProvider()
-create_provider("unknown")  # → ValueError: Unknown provider: 'unknown'. Available: github_models, groq, openrouter
+def list_providers() -> list[str]
+    # Returns all registered provider IDs from manifest registry
+
+def get_provider_status() -> dict[str, dict]
+    # Returns {name: {adapter, display_name, capabilities, priority, health, enabled}}
 ```
 
 ### Error Type Alignment
@@ -526,7 +591,242 @@ The provider layer and rotator layer must agree on error type strings:
 
 ---
 
-## 9. Security Model
+## 9. Dynamic Provider System
+
+The manifest system enables zero-code-change provider additions.
+
+### ProviderManifest
+
+Each provider declares its capabilities via a `ProviderManifest`:
+
+```python
+@dataclass
+class ProviderManifest:
+    provider_id: str              # "groq", "together", etc.
+    display_name: str             # "Groq", "Together AI"
+    adapter: str                  # "builtin", "generic", or module path
+    supported_models: list[str]   # ["llama-3.3-70b", "mixtral-8x7b"]
+    capabilities: list[str]       # ["reasoning", "coding", "fast_inference"]
+    priority: int                 # 1 (highest) → 10 (lowest)
+    health: str                   # "healthy", "degraded", "unhealthy", "unknown"
+    enabled: bool                 # True/False
+    endpoint: str                 # "https://api.groq.com/..."
+    default_model: str            # "llama-3.3-70b-versatile"
+```
+
+### Capability Constants
+
+```python
+CAPABILITY_REASONING = "reasoning"
+CAPABILITY_CODING = "coding"
+CAPABILITY_LONG_CONTEXT = "long_context"
+CAPABILITY_VISION = "vision"
+CAPABILITY_SEARCH = "search"
+CAPABILITY_FAST_INFERENCE = "fast_inference"
+CAPABILITY_LOW_COST = "low_cost"
+```
+
+### ManifestRegistry (Global Singleton)
+
+```python
+manifest_registry = ManifestRegistry()  # Global instance
+
+# Query methods
+manifest_registry.get(provider_id) → Optional[ProviderManifest]
+manifest_registry.get_enabled() → dict[str, ProviderManifest]
+manifest_registry.get_healthy() → dict[str, ProviderManifest]  # enabled + healthy/unknown
+manifest_registry.get_by_capability(cap) → list[ProviderManifest]  # sorted by priority
+manifest_registry.get_healthy_by_capability(cap) → list[ProviderManifest]
+
+# Mutation methods
+manifest_registry.register(manifest)
+manifest_registry.update_health(provider_id, health)
+manifest_registry.set_enabled(provider_id, enabled)
+
+# Introspection
+"provider_id" in manifest_registry  # __contains__
+manifest_registry.list_provider_ids()
+manifest_registry.list_capabilities()
+```
+
+### Capability-Based Routing
+
+```python
+# capability_router.py
+class CapabilityRouter:
+    def route_by_capability(capability, exclude_providers=None) → list[ProviderManifest]
+    def get_healthy_provider_for_capability(capability, exclude=None) → Optional[ProviderManifest]
+    def execute_with_capability_routing(capability, request_fn, exclude=None) → dict
+```
+
+### Fallback Chain (3-Phase)
+
+```python
+# fallback_chain.py
+class FallbackChain:
+    def execute_with_fallback(
+        capability, request_fn, deterministic_fn=None,
+        max_retries_per_provider=1, exclude_providers=None
+    ) → FallbackResult
+
+# Phase 1: Capability-matched providers (with retries + exponential backoff)
+# Phase 2: All healthy providers (without capability filter)
+# Phase 3: Deterministic fallback (caller-provided function)
+```
+
+### Key Loading (Dynamic)
+
+```python
+# startup/key_loader.py
+def load_provider_keys(config: Config) → Config
+    # Priority 1: AIKEYPOOL_PROVIDER_KEYS = '{"groq": ["key1"], "together": ["key2"]}'
+    # Priority 2: AIKEYPOOL_PROVIDER_<NAME>_KEYS = "key1,key2" (additive/legacy)
+    # Auto-registers new providers in manifest registry
+
+def get_configured_providers() → list[str]
+    # Returns sorted list of providers with at least one key configured
+```
+
+---
+
+## 10. Multi-Agent Research
+
+Research uses a 6-agent pipeline for comprehensive analysis.
+
+### Agent Roles
+
+| Role | Capabilities Required | Purpose |
+|------|----------------------|---------|
+| RESEARCHER | reasoning, coding | Gathers initial findings |
+| EVIDENCE_COLLECTOR | reasoning | Validates and sources claims |
+| VERIFIER | reasoning, coding | Cross-references findings |
+| CONTRADICTION_DETECTOR | reasoning | Identifies conflicting information |
+| CRITIC | reasoning | Quality control and bias detection |
+| WRITER | reasoning, coding | Produces executive summary |
+
+### Pipeline Flow
+
+```
+Raw Findings → RESEARCHER → EVIDENCE_COLLECTOR → VERIFIER
+              → CONTRADICTION_DETECTOR → CRITIC → WRITER
+              → Consolidated Results
+```
+
+Each agent:
+1. Selects best provider via capability routing
+2. Builds role-specific prompt
+3. Executes via FallbackChain
+4. Parses JSON response
+5. Feeds output to next agent
+
+### Output Structure
+
+```python
+{
+    "agent_results": [...],           # Per-agent results
+    "success_count": 5,
+    "total_count": 6,
+    "providers_used": ["groq", "openrouter"],
+    "consolidated_findings": [...],
+    "verified_claims": [...],
+    "contradictions": [...],
+    "open_questions": [...],
+    "action_items": [...],
+    "executive_summary": "..."
+}
+```
+
+---
+
+## 11. Provider Discovery
+
+Automatic discovery of new AI providers from community sources.
+
+### Discovery Sources
+
+| Source | URL | Description |
+|--------|-----|-------------|
+| cool-ai-stuff | github.com/zukixa/cool-ai-stuff | Curated list of free AI APIs |
+| free-llm-api-resources | github.com/cheahjs/free-llm-api-resources | Community-maintained free LLM APIs |
+
+### Discovery Process
+
+```
+discover_providers(config)
+│
+├─ For each source:
+│  ├─ Fetch README content
+│  ├─ Parse for API endpoints (regex patterns)
+│  ├─ Extract: provider names, models, free tier indicators
+│  └─ Filter: exclude configured + blocklisted providers
+│
+├─ Deduplicate suggestions
+│
+├─ Save results to data/discovery_results.json
+│
+└─ Return: {
+    "timestamp": "...",
+    "sources_checked": 2,
+    "sources_succeeded": 2,
+    "total_suggestions": 15,
+    "new_suggestions": 10,
+    "configured_providers": ["groq"],
+    "suggestions": [...]
+}
+```
+
+### Blocklist
+
+Non-OpenAI-compatible providers excluded:
+- anthropic, google, meta, aws_bedrock, azure_ai, together_ai (when incompatible)
+- cohere, mistral (when using native API)
+
+---
+
+## 12. Historical Intelligence
+
+Track provider changes over time for trend analysis.
+
+### Tracking Categories
+
+| Category | Data Structure | Purpose |
+|----------|---------------|---------|
+| Provider History | first_seen, last_active, status, models | Track provider lifecycle |
+| Model History | provider, released, status, first_seen | Track model availability |
+| Rate Limit Changes | provider, date, change, old/new value | Monitor API limit changes |
+| Free Tier Changes | provider, date, change | Track free tier modifications |
+| Provider Outages | provider, start, end, reason | Incident tracking |
+| Discoveries | provider, source, details | Discovery provenance |
+
+### HistoryTracker
+
+```python
+# history_tracker.py
+class HistoryTracker:
+    def update_provider(provider_id, status, models, capabilities)
+    def update_model(model_name, provider, status)
+    def record_rate_limit_change(provider, change, old_value, new_value)
+    def record_free_tier_change(provider, change)
+    def record_outage(provider, reason, start, end)
+    def record_discovery(provider, source, details)
+    
+    def get_changes_since(since_date) → dict
+    def get_changes_since_last_report() → dict  # includes is_first_report
+    def mark_report_generated()
+    def format_changes_since_last_report() → str  # human-readable text
+```
+
+### Integration with Research
+
+History informs research by:
+1. Tracking which providers have been analyzed
+2. Detecting changes since last report
+3. Identifying trends (new providers, model deprecations)
+4. Providing context for contradiction detection
+
+---
+
+## 13. Security Model
 
 ### Authentication
 
@@ -547,7 +847,8 @@ Client Request
 
 | Secret | Location | Never In |
 |--------|----------|----------|
-| Provider API keys | `AIKEYPOOL_PROVIDER_<NAME>_KEYS` env var | Response bodies, logs, dashboard JSON |
+| Provider API keys (JSON) | `AIKEYPOOL_PROVIDER_KEYS` env var | Response bodies, logs, dashboard JSON |
+| Provider API keys (legacy) | `AIKEYPOOL_PROVIDER_<NAME>_KEYS` env var | Response bodies, logs, dashboard JSON |
 | Master key | `AIKEYPOOL_MASTER_KEY` env var | URLs, query params |
 | SMTP credentials | `SMTP_USER` / `SMTP_PASSWORD` env vars | Commit history, dashboard |
 
@@ -592,7 +893,7 @@ These files are safe to expose publicly.
 
 ---
 
-## 10. Configuration Model
+## 14. Configuration Model
 
 ### Loading Order
 
@@ -606,7 +907,8 @@ load_config(config_path=None)
 │  ├─ AIKEYPOOL_MAX_CONSECUTIVE_FAILURES (default: 5)
 │  ├─ AIKEYPOOL_LOG_LEVEL (default: "INFO")
 │  ├─ AIKEYPOOL_DATA_DIR (default: ./data)
-│  └─ AIKEYPOOL_PROVIDER_<NAME>_KEYS (comma-separated)
+│  ├─ AIKEYPOOL_PROVIDER_KEYS (JSON object, primary)
+│  └─ AIKEYPOOL_PROVIDER_<NAME>_KEYS (comma-separated, legacy/additive)
 │
 ├─ 2. Optional JSON config file (overrides env vars):
 │  ├─ master_key
@@ -648,7 +950,8 @@ class ProviderConfig:
 | `AIKEYPOOL_MAX_CONSECUTIVE_FAILURES` | int | 5 | Auto-disable after N failures |
 | `AIKEYPOOL_LOG_LEVEL` | string | INFO | DEBUG, INFO, WARNING, ERROR |
 | `AIKEYPOOL_DATA_DIR` | path | ./data | JSON persistence directory |
-| `AIKEYPOOL_PROVIDER_*_KEYS` | string | None | Comma-separated API keys |
+| `AIKEYPOOL_PROVIDER_KEYS` | JSON | None | `{"provider": ["key1", "key2"]}` (primary) |
+| `AIKEYPOOL_PROVIDER_*_KEYS` | string | None | Comma-separated API keys (legacy/additive) |
 | `SMTP_HOST` | string | None | SMTP server hostname |
 | `SMTP_PORT` | int | 587 | SMTP server port |
 | `SMTP_USER` | string | None | SMTP username |
@@ -657,7 +960,7 @@ class ProviderConfig:
 
 ---
 
-## 11. GitHub Actions Workflows
+## 15. GitHub Actions Workflows
 
 ### Daily Maintenance (`daily-maintenance.yml`)
 
@@ -670,6 +973,9 @@ Permissions: contents: write
 ├─ Step 3: pip install -r requirements.txt
 ├─ Step 4: Run daily maintenance
 │  ├─ Env: All AIKEYPOOL_* secrets, SMTP secrets
+│  │  ├─ AIKEYPOOL_PROVIDER_KEYS (JSON, primary)
+│  │  ├─ AIKEYPOOL_PROVIDER_*_KEYS (legacy/additive)
+│  │  └─ All other AIKEYPOOL_* config vars
 │  └─ Command: python -m src.maintenance.orchestrator
 │     └─ Produces: dashboard/data/status.json, dashboard/data/recommendations.json
 ├─ Step 5: Commit updated dashboard data
@@ -720,7 +1026,7 @@ daily-maintenance.yml (06:00 UTC)
 
 ---
 
-## 12. Deployment Guide
+## 16. Deployment Guide
 
 ### Prerequisites
 
@@ -806,7 +1112,7 @@ Set these in Settings → Secrets → Actions:
 
 ---
 
-## 13. Sequence Diagrams
+## 17. Sequence Diagrams
 
 ### Chat Request
 
@@ -900,36 +1206,54 @@ GitHub Actions       orchestrator         research            dashboard_gen     
   │                    │ load_config()      │                    │                    │
   │                    │ KeyManager()       │                    │                    │
   │                    │                    │                    │                    │
+  │                    │ STEP 0a: validate_config()              │                    │
+  │                    │ STEP 0b: load_provider_keys()           │                    │
+  │                    │ STEP 0c: sync_provider_keys()           │                    │
+  │                    │ STEP 0d: list_providers()               │                    │
+  │                    │                    │                    │                    │
   │                    │ STEP 1: Health     │                    │                    │
   │                    │ get_all_stats()    │                    │                    │
   │                    │─── OK ────────────│                    │                    │
   │                    │                    │                    │                    │
-  │                    │ STEP 2: Status     │                    │                    │
+  │                    │ STEP 1b: Discovery │                    │                    │
+  │                    │ discover_providers()                    │                    │
+  │                    │ save_discovery_results()                │                    │
+  │                    │                    │                    │                    │
+  │                    │ STEP 1c: History   │                    │                    │
+  │                    │ HistoryTracker     │                    │                    │
+  │                    │                    │                    │                    │
+  │                    │ STEP 2: Research   │                    │                    │
+  │                    │ _run_research_loop()                    │                    │
+  │                    │─────────────────>│                    │                    │
+  │                    │                    │ MultiAgentOrch     │                    │
+  │                    │                    │ FallbackChain      │                    │
+  │                    │                    │ CapabilityRouter   │                    │
+  │                    │                    │ (calls AI APIs)    │                    │
+  │                    │ ◄─ findings ─────│                    │                    │
+  │                    │                    │                    │                    │
+  │                    │ STEP 3: Report     │                    │                    │
+  │                    │ generate_final_report()                 │                    │
+  │                    │                    │                    │                    │
+  │                    │ STEP 4: Status     │                    │                    │
   │                    │ generate_status_json()                  │                    │
   │                    │──────────────────────────────────────>│                    │
   │                    │                    │                    │ write status.json  │
   │                    │ ◄─ OK ─────────────────────────────────│                    │
   │                    │                    │                    │                    │
-  │                    │ STEP 3: Research   │                    │                    │
-  │                    │ research_providers()                    │                    │
-  │                    │─────────────────>│                    │                    │
-  │                    │                    │ create_provider()  │                    │
-  │                    │                    │ rotator.execute()  │                    │
-  │                    │                    │ (calls AI API)     │                    │
-  │                    │                    │ parse JSON         │                    │
-  │                    │ ◄─ findings ─────│                    │                    │
-  │                    │                    │                    │                    │
-  │                    │ STEP 4: Recs       │                    │                    │
+  │                    │ STEP 5: Recs       │                    │                    │
   │                    │ generate_recommendations_json()         │                    │
   │                    │──────────────────────────────────────>│                    │
   │                    │                    │                    │ write recs.json    │
   │                    │ ◄─ OK ─────────────────────────────────│                    │
   │                    │                    │                    │                    │
-  │                    │ STEP 5: Email      │                    │                    │
-  │                    │ send_daily_summary()                    │                    │
+  │                    │ STEP 6: Email      │                    │                    │
+  │                    │ _do_send_email()   │                    │                    │
   │                    │─────────────────────────────────────────────────────────>│
   │                    │                    │                    │ SMTP send          │
   │                    │ ◄─ True/False ────────────────────────────────────────────│
+  │                    │                    │                    │                    │
+  │                    │ STEP 7: Archive    │                    │                    │
+  │                    │ archive_cycle()    │                    │                    │
   │                    │                    │                    │                    │
   │ ◄─ JSON result     │                    │                    │                    │
   │                    │                    │                    │                    │
@@ -940,9 +1264,25 @@ GitHub Actions       orchestrator         research            dashboard_gen     
 
 ---
 
-## 14. Extension Guide
+## 18. Extension Guide
 
-### Adding a New Provider
+### Adding a New Provider (Zero-Code for Generic OpenAI-Compatible)
+
+For OpenAI-compatible providers, no code changes are needed:
+
+```bash
+# Just set the environment variable:
+export AIKEYPOOL_PROVIDER_MY_PROVIDER_KEYS="key1,key2"
+
+# Or add to AIKEYPOOL_PROVIDER_KEYS JSON:
+export AIKEYPOOL_PROVIDER_KEYS='{"groq": ["key1"], "my_provider": ["key2"]}'
+```
+
+The system auto-detects and registers the provider as a generic OpenAI-compatible adapter.
+
+### Adding a New Builtin Provider (Custom Adapter)
+
+For providers with non-standard APIs:
 
 **1. Create the adapter file:**
 
@@ -950,6 +1290,7 @@ GitHub Actions       orchestrator         research            dashboard_gen     
 # src/providers/my_provider.py
 
 from .base_provider import BaseProvider
+from .manifest import ProviderManifest
 
 class MyProvider(BaseProvider):
     def get_provider_name(self) -> str:
@@ -963,20 +1304,28 @@ class MyProvider(BaseProvider):
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
+
+    def get_manifest(self) -> ProviderManifest:
+        return ProviderManifest(
+            provider_id="my_provider",
+            display_name="My Provider",
+            adapter="builtin",
+            capabilities=["reasoning", "coding"],
+            priority=5,
+            endpoint=self.get_endpoint(),
+            default_model="my-model-1",
+        )
 ```
 
-**2. Register in the factory:**
+**2. Register in provider_factory.py:**
 
 ```python
-# src/providers/provider_factory.py
-
-from .my_provider import MyProvider
-
-PROVIDER_MAP = {
+# In _BUILTIN_PROVIDERS dict:
+_BUILTIN_PROVIDERS = {
     "github_models": GitHubModelsProvider,
     "groq": GroqProvider,
     "openrouter": OpenRouterProvider,
-    "my_provider": MyProvider,          # ← Add this
+    "my_provider": MyProvider,  # ← Add this
 }
 ```
 
@@ -999,6 +1348,19 @@ export AIKEYPOOL_PROVIDER_MY_PROVIDER_KEYS="key1,key2"
 ```
 
 **No changes needed in the core engine, API routes, or maintenance scripts.**
+
+### Adding a New Capability
+
+```python
+# In manifest.py, add constant:
+CAPABILITY_MY_FEATURE = "my_feature"
+
+# In provider's get_manifest():
+capabilities=["reasoning", "my_feature"]
+
+# In agents.py, add to ROLE_CAPABILITIES:
+ROLE_CAPABILITIES[AgentRole.MY_ROLE] = ["my_feature"]
+```
 
 ### Adding a New Dashboard Page
 
@@ -1080,7 +1442,7 @@ def run_daily_maintenance() -> dict:
 
 ---
 
-## 15. Known Limitations
+## 19. Known Limitations
 
 | Limitation | Impact | Workaround |
 |------------|--------|------------|
@@ -1097,23 +1459,39 @@ def run_daily_maintenance() -> dict:
 
 ---
 
-## 16. Future Roadmap
+## 20. Future Roadmap
 
-### v1.1.0 — Provider Improvements
+### v1.1.0 — Dynamic Provider System ✅
+- [x] Provider manifest system with capabilities
+- [x] Capability-based routing
+- [x] Fallback chain with deterministic fallback
+- [x] Dynamic key loading (AIKEYPOOL_PROVIDER_KEYS JSON)
+- [x] Generic OpenAI-compatible adapter
+- [x] Zero-code provider additions
+
+### v1.2.0 — Intelligence System ✅
+- [x] Multi-agent research (6 roles)
+- [x] GitHub provider discovery
+- [x] Historical intelligence tracking
+- [x] Executive report with 12 sections
+- [x] Smart recommendations (exclude configured providers)
+- [x] Suggested providers from discovery
+
+### v1.3.0 — Operational Improvements
 - [ ] Anthropic native adapter (Messages API)
-- [ ] OpenAI native adapter ( Responses API)
+- [ ] OpenAI native adapter (Responses API)
 - [ ] Configurable HTTP timeout per provider
 - [ ] Connection pooling (shared `httpx.Client`)
 - [ ] Use `ProviderError.error_type` directly in rotator (remove substring matching)
 
-### v1.2.0 — Operational Improvements
+### v1.4.0 — Observability
 - [ ] Consolidate `key_registry.json` and `key_health.json` into single file
 - [ ] Rate limiting middleware for API
 - [ ] Request logging middleware (latency, key used, provider)
 - [ ] Health check endpoint for each provider (not just overall)
 - [ ] Prometheus metrics export
 
-### v1.3.0 — Dashboard Improvements
+### v1.5.0 — Dashboard Improvements
 - [ ] Real-time dashboard via WebSocket
 - [ ] Key usage charts (success/failure over time)
 - [ ] Provider comparison view
@@ -1131,4 +1509,4 @@ def run_daily_maintenance() -> dict:
 
 ---
 
-*This document was generated from the AI Key Pool v1.0.0 codebase.*
+*This document was generated from the AI Key Pool v1.2.0 codebase.*
