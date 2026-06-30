@@ -693,8 +693,15 @@ def main():
     test_independent_failure_handling()
     test_config_endpoint_models()
 
+    print("\nRunning Runtime Manager tests...")
+    import test_runtime_manager
+    test_runtime_manager.test_runtime_manager_state_load_save()
+    test_runtime_manager.test_runtime_manager_gating()
+    test_runtime_manager.test_runtime_manager_archiving()
+    test_runtime_manager.test_orchestrator_integration()
+
     print("\n" + "=" * 50)
-    print("All 34 tests passed!")
+    print("All 38 tests passed!")
     print("=" * 50)
 
 

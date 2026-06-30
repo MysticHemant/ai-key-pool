@@ -410,7 +410,7 @@ def collect_all_sources() -> list[dict]:
 # ─── LLM summarization ──────────────────────────────────────────────────────
 
 
-RESEARCH_PROMPT = """You are an AI provider research assistant. You will receive raw findings collected from official public sources (blogs, RSS feeds, announcement pages) about AI API providers.
+RESEARCH_PROMPT = """You are an AI provider research assistant. You will receive raw findings collected from official public sources (blogs, RSS feeds, announcement pages) about AI API providers, along with previous iteration research memory (if any).
 
 Analyze the findings and respond ONLY with valid JSON (no markdown fences).
 
@@ -431,12 +431,25 @@ Action rules:
 
 NEVER use "add_key" — models do not require API keys. A new model release is an "update", not a key action.
 
-Also identify:
-- pricing changes
-- free tier changes
-- new models
-- API deprecations
-- breaking changes
+Identify pricing changes, free tier changes, new models, API deprecations, and breaking changes.
+
+Additionally, you MUST evaluate the research quality and produce an iteration report. Include:
+1. "iteration_report": An object with:
+   - summary: concise summary of findings/state in this iteration.
+   - evidence: bullet points of concrete facts found in the raw findings.
+   - sources: list of source URLs.
+   - confidence: assessment of overall confidence.
+   - assumptions: assumptions made that need verification.
+   - unanswered_questions: questions that remain unanswered.
+   - contradictions: conflicting information from sources (or null if none).
+   - recommendations_next: recommendations for what to focus on in the next iteration.
+2. "evaluation": An object with:
+   - quality_score: integer from 0 to 100 reflecting the depth and correctness of findings.
+   - coverage_score: integer from 0 to 100 based on how many providers/topics were covered.
+   - confidence_score: integer from 0 to 100 based on source reliability and certainty.
+   - completed_topics: list of topics/providers successfully researched.
+   - research_questions: list of new or remaining questions for next runs.
+   - assumptions: list of current assumptions.
 
 Respond with JSON in this exact format:
 {
@@ -456,7 +469,25 @@ Respond with JSON in this exact format:
   "new_models": ["list of new model names if any"],
   "pricing_changes": ["list of pricing changes if any"],
   "free_tier_changes": ["list of free tier changes if any"],
-  "breaking_changes": ["list of breaking changes if any"]
+  "breaking_changes": ["list of breaking changes if any"],
+  "iteration_report": {
+    "summary": "...",
+    "evidence": "...",
+    "sources": "...",
+    "confidence": "...",
+    "assumptions": ["...", "..."],
+    "unanswered_questions": ["...", "..."],
+    "contradictions": ["...", "..."],
+    "recommendations_next": "..."
+  },
+  "evaluation": {
+    "quality_score": 0,
+    "coverage_score": 0,
+    "confidence_score": 0,
+    "completed_topics": ["...", "..."],
+    "research_questions": ["...", "..."],
+    "assumptions": ["...", "..."]
+  }
 }
 
 Only include official, legitimate providers. Do not recommend leaked or unauthorized API keys.
@@ -467,6 +498,7 @@ def _llm_summarize(
     raw_findings: list[dict],
     config: Config,
     key_manager: KeyManager,
+    runtime_state: dict = None,
 ) -> Optional[dict]:
     """Use the configured AI provider to summarize raw findings.
 
@@ -474,6 +506,7 @@ def _llm_summarize(
         raw_findings: Deduplicated raw findings from web sources
         config: System configuration
         key_manager: Key manager instance
+        runtime_state: Optional dict with iterative runtime state
 
     Returns:
         Parsed JSON dict from LLM, or None on failure
@@ -514,7 +547,47 @@ def _llm_summarize(
         context_lines.append(line)
 
     context = "\n".join(context_lines)
-    user_prompt = f"Here are the raw findings from official sources:\n\n{context}\n\nAnalyze and produce the JSON summary."
+    user_prompt = f"Here are the raw findings from official sources:\n\n{context}\n\n"
+
+    # Read previous iterations
+    previous_research_context = ""
+    if runtime_state:
+        iteration = runtime_state.get("iteration", 1)
+        research_dir = config.data_dir / "research"
+        prev_iters = []
+        for i in range(1, iteration):
+            p = research_dir / f"iteration_{i}.md"
+            if p.exists():
+                try:
+                    content = p.read_text(encoding="utf-8")
+                    prev_iters.append(f"=== ITERATION {i} ===\n{content}")
+                except Exception as e:
+                    logger.warning("Could not read previous iteration file %s: %s", p, e)
+        if prev_iters:
+            previous_research_context = "\n\n".join(prev_iters)
+
+        user_prompt += "=== RUNTIME STATE ===\n"
+        user_prompt += f"Current Iteration: {runtime_state.get('iteration', 1)}\n"
+        user_prompt += f"Previous Assumptions: {runtime_state.get('assumptions', [])}\n"
+        user_prompt += f"Previous Unanswered Questions: {runtime_state.get('research_questions', [])}\n"
+        user_prompt += f"Previous Mistakes/History: {runtime_state.get('history', [])}\n\n"
+
+        if previous_research_context:
+            user_prompt += "=== PREVIOUS ITERATIONS' RESEARCH MEMORY ===\n"
+            user_prompt += previous_research_context + "\n\n"
+
+        user_prompt += (
+            "Based on the previous iterations' research memory, current state, assumptions, and unanswered questions, "
+            "perform the next level of research. Specifically address:\n"
+            "- What information is still missing?\n"
+            "- Which assumptions may be incorrect?\n"
+            "- Which claims require verification?\n"
+            "- Which sources disagree?\n"
+            "- What should be researched next?\n"
+            "- How can this report become more complete?\n\n"
+        )
+
+    user_prompt += "Analyze and produce the JSON summary."
 
     messages = [
         ChatMessage(role="system", content="You are a research assistant. Respond only with valid JSON."),
@@ -608,6 +681,7 @@ def research_providers(
     config: Config,
     key_manager: KeyManager,
     history_path: Path,
+    runtime_state: dict = None,
 ) -> dict:
     """Run provider research using real web data.
 
@@ -624,6 +698,7 @@ def research_providers(
         config: System configuration
         key_manager: Key manager instance
         history_path: Path to research_history.json
+        runtime_state: Optional dict with iterative runtime state
 
     Returns:
         Research findings dict with 'findings', 'summary', etc.
@@ -646,7 +721,7 @@ def research_providers(
         logger.info("STEP START: LLM summarization of %d findings", len(raw_findings))
         llm_start = time.monotonic()
         try:
-            summarized = _llm_summarize(raw_findings, config, key_manager)
+            summarized = _llm_summarize(raw_findings, config, key_manager, runtime_state)
         except Exception as e:
             logger.error("LLM summarization failed: %s", e)
             summarized = None
@@ -670,6 +745,9 @@ def research_providers(
             "Check network connectivity and source availability."
         )
         findings_result["_success"] = False
+
+    # Normalize findings_result to ensure new required keys are present
+    findings_result = _normalize_research_result(findings_result)
 
     # Step 3b: Filter, deduplicate, prioritize findings
     configured_providers = key_manager.registry.get_all_providers()
@@ -729,6 +807,127 @@ def _build_raw_fallback(raw_findings: list[dict]) -> dict:
     return {
         "findings": findings,
         "summary": f"Collected {len(findings)} findings from official sources (LLM summarization unavailable)",
+        "new_providers": [],
+        "new_models": [],
+        "pricing_changes": [],
+        "free_tier_changes": [],
+        "breaking_changes": [],
+    }
+
+
+def _normalize_research_result(res: dict) -> dict:
+    """Normalize LLM or fallback findings result to contain iteration_report and evaluation."""
+    if not isinstance(res, dict):
+        res = {}
+    res.setdefault("findings", [])
+    res.setdefault("summary", "No findings available")
+    res.setdefault("new_providers", [])
+    res.setdefault("new_models", [])
+    res.setdefault("pricing_changes", [])
+    res.setdefault("free_tier_changes", [])
+    res.setdefault("breaking_changes", [])
+    res.setdefault("iteration_report", {
+        "summary": "Initial/fallback summary",
+        "evidence": "None",
+        "sources": "",
+        "confidence": "low",
+        "assumptions": [],
+        "unanswered_questions": [],
+        "contradictions": [],
+        "recommendations_next": ""
+    })
+    res.setdefault("evaluation", {
+        "quality_score": 60,
+        "coverage_score": 50,
+        "confidence_score": 50,
+        "completed_topics": [],
+        "research_questions": [],
+        "assumptions": []
+    })
+    return res
+
+
+def generate_final_report(config: Config, key_manager: KeyManager, runtime_state: dict) -> dict:
+    """Consolidate all iteration reports into a single, polished final report using the LLM."""
+    iteration = runtime_state.get("iteration", 1)
+    research_dir = config.data_dir / "research"
+
+    # Load all iterations
+    iters_content = []
+    for i in range(1, iteration + 1):
+        p = research_dir / f"iteration_{i}.md"
+        if p.exists():
+            try:
+                iters_content.append(f"=== ITERATION {i} ===\n{p.read_text(encoding='utf-8')}")
+            except Exception as e:
+                logger.error("Could not read iteration %d file: %s", i, e)
+
+    combined_context = "\n\n".join(iters_content)
+
+    # Prompt the LLM to merge and polish
+    merge_prompt = """You are a senior AI research analyst. You are given a series of research iterations about AI provider updates, model releases, and pricing changes.
+
+    Your task is to:
+    1. Merge all findings from all iterations.
+    2. Remove duplicate findings.
+    3. Resolve any contradictions between different iterations (favoring more recent, verified findings).
+    4. Produce a single polished, comprehensive markdown report summary under "summary" and a final consolidated JSON list of findings under "findings".
+
+    Respond ONLY with a valid JSON object (no markdown fences) containing:
+    {
+      "findings": [
+        {
+          "provider": "...",
+          "model": "...",
+          "description": "...",
+          "url": "...",
+          "type": "...",
+          "action": "...",
+          "confidence": "..."
+        }
+      ],
+      "summary": "A comprehensive, high-quality markdown formatted final research report. Include sections for Executive Summary, Key Provider Updates, Model Releases, Pricing/Free-Tier Changes, and Strategic Recommendations.",
+      "new_providers": ["..."],
+      "new_models": ["..."],
+      "pricing_changes": ["..."],
+      "free_tier_changes": ["..."],
+      "breaking_changes": ["..."]
+    }
+    """
+
+    rotator = KeyRotator(config, key_manager)
+    provider_name = config.active_provider
+    try:
+        provider = create_provider(provider_name)
+    except Exception as e:
+        logger.error("Cannot create provider to generate final report: %s", e)
+        return _build_raw_fallback_final(combined_context)
+
+    messages = [
+        ChatMessage(role="system", content="You are a report consolidation assistant. Respond only with valid JSON."),
+        ChatMessage(role="user", content=f"{merge_prompt}\n\nHere are the iterations:\n\n{combined_context}"),
+    ]
+    model = provider.get_default_model()
+
+    def request_fn(api_key: str):
+        return provider.chat(api_key, model, messages)
+
+    result = rotator.execute_with_rotation(provider_name, request_fn)
+    if not result.success or not result.response:
+        logger.error("LLM final report consolidation failed: %s", result.error)
+        return _build_raw_fallback_final(combined_context)
+
+    parsed = _parse_findings(result.response.content)
+    if parsed:
+        return parsed
+    return _build_raw_fallback_final(combined_context)
+
+
+def _build_raw_fallback_final(combined_context: str) -> dict:
+    """Fallback when final consolidation fails."""
+    return {
+        "findings": [],
+        "summary": f"# Consolidated Research Report (Fallback)\n\nFailed to consolidate via LLM. Here is the raw history:\n\n{combined_context}",
         "new_providers": [],
         "new_models": [],
         "pricing_changes": [],

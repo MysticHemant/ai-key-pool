@@ -27,9 +27,10 @@ from ..utils.config_validator import validate_config, ConfigValidationReport
 from ..utils.logger import get_logger
 from ..startup import sync_provider_keys
 from ..providers.provider_factory import list_providers, get_provider_status
-from .research import research_providers
+from .research import research_providers, generate_final_report
 from .dashboard_gen import generate_status_json, generate_recommendations_json
 from .email_sender import send_daily_summary, EmailDeliveryError
+from .runtime_manager import RuntimeManager
 
 
 logger = get_logger("maintenance")
@@ -76,6 +77,8 @@ def run_daily_maintenance() -> dict:
     step_results: dict = {}
 
     config = load_config()
+    runtime_manager = RuntimeManager(config.data_dir)
+    runtime_state = runtime_manager.state
 
     # Dashboard output directory (GitHub Pages serves from here)
     dashboard_data = Path(__file__).parent.parent.parent / "dashboard" / "data"
@@ -178,21 +181,61 @@ def run_daily_maintenance() -> dict:
     logger.info("STEP START: Provider research")
     history_path = config.data_dir / "research_history.json"
     research_result, research_duration = _time_step(
-        research_providers, config, key_manager, history_path
+        research_providers, config, key_manager, history_path, runtime_state
     )
     if research_result is not _EXCEPTION:
         research_data = research_result
         findings_count = len(research_data.get("findings", []))
         research_success = research_data.get("_success", True)
+        
+        if research_success:
+            iteration = runtime_manager.determine_current_iteration()
+            research_dir = config.data_dir / "research"
+            research_dir.mkdir(parents=True, exist_ok=True)
+            iter_file = research_dir / f"iteration_{iteration}.md"
+            
+            report_data = research_data.get("iteration_report", {})
+            markdown_content = f"""# Research Iteration {iteration}
+
+## Summary
+{report_data.get('summary', 'No summary provided.')}
+
+## Evidence
+{report_data.get('evidence', 'No evidence provided.')}
+
+## Sources
+{report_data.get('sources', 'No sources provided.')}
+
+## Confidence
+{report_data.get('confidence', 'medium')}
+
+## Assumptions
+{chr(10).join(f"- {a}" for a in report_data.get('assumptions', [])) if report_data.get('assumptions') else "None"}
+
+## Unanswered Questions
+{chr(10).join(f"- {q}" for q in report_data.get('unanswered_questions', [])) if report_data.get('unanswered_questions') else "None"}
+
+## Contradictions
+{chr(10).join(f"- {c}" for c in report_data.get('contradictions', [])) if report_data.get('contradictions') else "None"}
+
+## Recommendations for the next iteration
+{report_data.get('recommendations_next', 'None')}
+"""
+            try:
+                iter_file.write_text(markdown_content, encoding="utf-8")
+                logger.info("Saved iteration report to %s", iter_file)
+            except Exception as e:
+                logger.error("Failed to write iteration report to %s: %s", iter_file, e)
+
+            runtime_manager.update_state(research_data.get("evaluation", {}), research_data.get("findings", []))
+
         step_results["research"] = {
             "status": "ok" if research_success else "error",
             "duration_seconds": round(research_duration, 2),
             "findings_count": findings_count,
             "has_llm_summary": research_data.get("has_llm_summary", False),
         }
-        if research_success:
-            logger.info("STEP END: Research — %d findings in %.1fs", findings_count, research_duration)
-        else:
+        if not research_success:
             errors.append(f"Research failed: {research_data.get('summary', 'unknown reason')}")
             logger.error("STEP FAIL: Research — %s (%.1fs)", research_data.get("summary", "unknown"), research_duration)
     else:
@@ -242,25 +285,41 @@ def run_daily_maintenance() -> dict:
         logger.error("STEP FAIL: Dashboard recommendations (%.1fs)", recs_duration)
 
     # ── Step 5: Email ──
-    logger.info("STEP START: Email delivery")
-    email_result, email_duration = _time_step(
-        _do_send_email, config, stats, research_data, errors
-    )
-    if email_result is not _EXCEPTION:
-        step_results["email"] = {
-            "status": "sent" if email_result else "skipped",
-            "duration_seconds": round(email_duration, 2),
-        }
-        logger.info("STEP END: Email — %s in %.1fs",
-                     "sent" if email_result else "skipped", email_duration)
+    logger.info("STEP START: Email delivery decision")
+    email_result = False
+    email_duration = 0.0
+
+    if runtime_manager.should_send_email():
+        logger.info("Email condition met (Quality >= 90 or iteration limit reached). Consolidating final report.")
+        final_report = generate_final_report(config, key_manager, runtime_manager.state)
+        research_data = final_report
+
+        logger.info("STEP START: Email delivery")
+        email_result, email_duration = _time_step(
+            _do_send_email, config, stats, research_data, errors
+        )
+        if email_result is not _EXCEPTION:
+            step_results["email"] = {
+                "status": "sent" if email_result else "skipped",
+                "duration_seconds": round(email_duration, 2),
+            }
+            logger.info("STEP END: Email — %s in %.1fs",
+                         "sent" if email_result else "skipped", email_duration)
+            runtime_manager.archive_cycle()
+        else:
+            step_results["email"] = {
+                "status": "error",
+                "duration_seconds": round(email_duration, 2),
+            }
+            errors.append("Email delivery failed — see EMAIL FAILED log above for SMTP stage details")
+            logger.error("STEP FAIL: Email (%.1fs)", email_duration)
     else:
+        logger.info("Email skipped (Quality < 90 and iteration < max). Saving state and incrementing iteration.")
+        runtime_manager.increment_iteration()
         step_results["email"] = {
-            "status": "error",
-            "duration_seconds": round(email_duration, 2),
+            "status": "skipped",
+            "duration_seconds": 0.0,
         }
-        # The actual error was already logged by _do_send_email's except handler
-        errors.append("Email delivery failed — see EMAIL FAILED log above for SMTP stage details")
-        logger.error("STEP FAIL: Email (%.1fs)", email_duration)
 
     # ── Summary ──
     overall_duration = time.monotonic() - overall_start
