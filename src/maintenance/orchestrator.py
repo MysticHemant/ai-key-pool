@@ -1,15 +1,17 @@
 """Daily maintenance orchestrator for AI Key Pool.
 
-Runs the full daily cycle with independent failure handling:
+Runs the full research cycle as a continuous session:
 0. Validate configuration and secrets
 1. Synchronize provider keys
 2. Discover providers and load plugins
 3. Health check all keys
-4. Research the AI ecosystem using real web data
-5. Generate dashboard JSON
-6. Generate recommendations JSON
-7. Send email summary
-8. Log diagnostics
+4. Research loop: iterate until quality targets met or limits reached
+5. Generate final report
+6. Generate dashboard JSON
+7. Generate recommendations JSON
+8. Send email summary
+9. Archive cycle and reset runtime
+10. Log diagnostics
 
 Each subsystem fails independently — one failure never terminates
 the entire workflow.
@@ -56,11 +58,253 @@ def _time_step(func, *args, **kwargs):
         return _EXCEPTION, duration
 
 
-def run_daily_maintenance() -> dict:
-    """Execute the full daily maintenance cycle.
+def _run_single_iteration(
+    config: Config,
+    key_manager: KeyManager,
+    runtime_manager: RuntimeManager,
+    history_path: Path,
+) -> dict:
+    """Execute a single research iteration.
 
-    Each subsystem runs independently. If one fails, the others
-    still execute. The workflow never terminates early.
+    Returns:
+        Dict with 'success', 'findings_count', 'has_llm_summary', 'duration_seconds'
+    """
+    iteration = runtime_manager.determine_current_iteration()
+    runtime_state = runtime_manager.state
+
+    logger.info("===== ITERATION %d =====", iteration)
+
+    # Research planning
+    if config.research_planner_enabled:
+        logger.info("Generating research plan for iteration %d", iteration)
+        plan = generate_research_plan(config, key_manager, runtime_state)
+        runtime_manager.state["current_plan"] = plan
+        runtime_manager.save_state()
+        logger.info("Research plan: Objectives=%s", plan.get("objectives", []))
+
+    # Memory compression
+    if iteration > config.memory_compression_threshold:
+        logger.info("Compressing memory for iteration %d", iteration)
+        compressed = compress_memory(config, key_manager, runtime_state)
+        runtime_manager.state["long_term_memory"] = compressed
+        runtime_manager.save_state()
+
+    # Research
+    logger.info("Researching iteration %d", iteration)
+    research_result, research_duration = _time_step(
+        research_providers, config, key_manager, history_path, runtime_state
+    )
+
+    if research_result is _EXCEPTION:
+        logger.error("Research failed with exception on iteration %d", iteration)
+        return {
+            "success": False,
+            "findings_count": 0,
+            "has_llm_summary": False,
+            "duration_seconds": round(research_duration, 2),
+        }
+
+    research_data = research_result
+    findings_count = len(research_data.get("findings", []))
+    research_success = research_data.get("_success", True)
+
+    if not research_success:
+        logger.error("Research returned failure on iteration %d: %s",
+                     iteration, research_data.get("summary", "unknown"))
+        return {
+            "success": False,
+            "findings_count": findings_count,
+            "has_llm_summary": research_data.get("has_llm_summary", False),
+            "duration_seconds": round(research_duration, 2),
+        }
+
+    # Save iteration report
+    research_dir = config.data_dir / "research"
+    research_dir.mkdir(parents=True, exist_ok=True)
+    iter_file = research_dir / f"iteration_{iteration}.md"
+
+    report_data = research_data.get("iteration_report", {})
+    markdown_content = f"""# Research Iteration {iteration}
+
+## Summary
+{report_data.get('summary', 'No summary provided.')}
+
+## Evidence
+{report_data.get('evidence', 'No evidence provided.')}
+
+## Sources
+{report_data.get('sources', 'No sources provided.')}
+
+## Confidence
+{report_data.get('confidence', 'medium')}
+
+## Assumptions
+{chr(10).join(f"- {a}" for a in report_data.get('assumptions', [])) if report_data.get('assumptions') else "None"}
+
+## Unanswered Questions
+{chr(10).join(f"- {q}" for q in report_data.get('unanswered_questions', [])) if report_data.get('unanswered_questions') else "None"}
+
+## Contradictions
+{chr(10).join(f"- {c}" for c in report_data.get('contradictions', [])) if report_data.get('contradictions') else "None"}
+
+## Recommendations for the next iteration
+{report_data.get('recommendations_next', 'None')}
+"""
+    try:
+        iter_file.write_text(markdown_content, encoding="utf-8")
+        logger.info("Saved iteration report to %s", iter_file)
+    except Exception as e:
+        logger.error("Failed to write iteration report to %s: %s", iter_file, e)
+
+    # Update runtime state
+    eval_data = research_data.get("evaluation", {})
+    logger.info("=== EVAL_DATA BEFORE RuntimeManager ===")
+    logger.info("type(eval_data): %s", type(eval_data).__name__)
+    logger.info("eval_data.keys(): %s", list(eval_data.keys()) if isinstance(eval_data, dict) else "NOT A DICT")
+    if isinstance(eval_data, dict):
+        logger.info("eval_data overall_quality: %s", eval_data.get("overall_quality", "MISSING"))
+        logger.info("eval_data coverage: %s", eval_data.get("coverage", "MISSING"))
+        logger.info("eval_data verification: %s", eval_data.get("verification", "MISSING"))
+        logger.info("eval_data verified_claims count: %d", len(eval_data.get("verified_claims", [])))
+    logger.info("=======================================")
+    runtime_manager.update_state(eval_data, research_data.get("findings", []))
+
+    # Iteration diagnostics
+    metrics = runtime_manager.state.get("quality_metrics", {})
+    logger.info("RESEARCH ITERATION %d COMPLETE", iteration)
+    logger.info("  Findings: %d", findings_count)
+    logger.info("  Quality: Overall=%d, Coverage=%d, Verification=%d, SourceDiversity=%d",
+                metrics.get("overall_quality", 0),
+                metrics.get("coverage", 0),
+                metrics.get("verification", 0),
+                metrics.get("source_diversity", 0))
+    logger.info("  Verified Claims: %d", len(runtime_manager.state.get("verified_claims", [])))
+    logger.info("  Open Questions: %d", len(runtime_manager.state.get("open_questions", [])))
+    logger.info("===== END ITERATION %d =====", iteration)
+
+    return {
+        "success": True,
+        "findings_count": findings_count,
+        "has_llm_summary": research_data.get("has_llm_summary", False),
+        "duration_seconds": round(research_duration, 2),
+    }
+
+
+def _run_research_loop(
+    config: Config,
+    key_manager: KeyManager,
+    runtime_manager: RuntimeManager,
+    history_path: Path,
+    session_start: float,
+) -> tuple[dict, str]:
+    """Run the research loop until completion or safety limits.
+
+    Returns:
+        (research_data, completion_reason) tuple
+    """
+    max_iterations = config.research_max_iterations
+    max_runtime_seconds = config.research_max_runtime_minutes * 60
+    max_api_budget = config.research_max_api_budget
+
+    research_data: dict = {"findings": [], "summary": "Not yet researched"}
+    completion_reason = ""
+    iterations_completed = 0
+
+    while True:
+        iteration = runtime_manager.determine_current_iteration()
+
+        # ── Safety limit: max iterations ──
+        if iteration > max_iterations:
+            completion_reason = "Maximum iterations reached (%d/%d)." % (iteration - 1, max_iterations)
+            logger.info("SAFETY LIMIT: %s", completion_reason)
+            break
+
+        # ── Safety limit: max runtime ──
+        elapsed = time.monotonic() - session_start
+        if elapsed >= max_runtime_seconds:
+            completion_reason = "Maximum runtime reached (%.0fs / %ds)." % (elapsed, max_runtime_seconds)
+            logger.info("SAFETY LIMIT: %s", completion_reason)
+            break
+
+        # ── Run single iteration ──
+        iter_result = _run_single_iteration(config, key_manager, runtime_manager, history_path)
+        iterations_completed += 1
+
+        # Build research_data from latest iteration
+        if iter_result["success"]:
+            # Re-read the latest state to get the full research data
+            research_dir = config.data_dir / "research"
+            iter_file = research_dir / f"iteration_{iteration}.md"
+            if iter_file.exists():
+                try:
+                    research_data = {
+                        "findings": runtime_manager.state.get("verified_claims", []),
+                        "summary": iter_file.read_text(encoding="utf-8")[:2000],
+                        "_success": True,
+                        "has_llm_summary": iter_result.get("has_llm_summary", False),
+                        "iteration_report": {
+                            "summary": iter_file.read_text(encoding="utf-8")[:500],
+                        },
+                    }
+                except Exception:
+                    pass
+
+        # ── Check completion ──
+        force_email = os.environ.get("AIKEYPOOL_FORCE_EMAIL", "").lower() == "true"
+        runtime_manager.log_completion_decision()
+
+        if runtime_manager.should_send_email() or force_email:
+            if force_email and not runtime_manager.should_send_email():
+                completion_reason = "Forced email (AIKEYPOOL_FORCE_EMAIL=true)."
+            else:
+                metrics = runtime_manager.state.get("quality_metrics", {})
+                iteration_count = runtime_manager.determine_current_iteration()
+                max_iter = runtime_manager.state.get("max_iterations", max_iterations)
+
+                quality_target = config.research_quality_threshold
+                overall_quality = metrics.get("overall_quality", 0)
+                coverage = metrics.get("coverage", 0)
+                verification = metrics.get("verification", 0)
+                verified_count = len(runtime_manager.state.get("verified_claims", []))
+
+                quality_met = (
+                    overall_quality >= quality_target
+                    and coverage >= config.min_coverage
+                    and verification >= config.min_verification_score
+                    and verified_count >= 3
+                )
+                max_reached = iteration_count >= max_iter
+
+                if quality_met and max_reached:
+                    completion_reason = "Quality threshold reached and maximum iterations reached."
+                elif quality_met:
+                    completion_reason = "Quality threshold reached."
+                else:
+                    completion_reason = "Maximum iterations reached (%d/%d)." % (iteration_count, max_iter)
+
+            logger.info("Completion reason: %s", completion_reason)
+            break
+
+        # ── Not done yet — increment and continue ──
+        logger.info("Continuing to next iteration...")
+        runtime_manager.increment_iteration()
+
+    # ── Session summary ──
+    elapsed = time.monotonic() - session_start
+    logger.info("Research Session Complete")
+    logger.info("Iterations: %d", iterations_completed)
+    logger.info("Reason: %s", completion_reason)
+    logger.info("Total research time: %.1fs", elapsed)
+
+    return research_data, completion_reason
+
+
+def run_daily_maintenance() -> dict:
+    """Execute the full research cycle as a continuous session.
+
+    Runs all iterations in a loop, then generates the final report,
+    sends email, archives, and resets. One schedule = one complete
+    research session.
 
     Returns:
         Summary dict with results of each step
@@ -69,7 +313,7 @@ def run_daily_maintenance() -> dict:
 
     # ── Step 0: Initialize ──
     logger.info("=" * 60)
-    logger.info("AI KEY POOL DAILY MAINTENANCE — START")
+    logger.info("AI KEY POOL RESEARCH SESSION — START")
     logger.info("Date: %s", datetime.now(timezone.utc).isoformat())
     logger.info("=" * 60)
 
@@ -79,6 +323,11 @@ def run_daily_maintenance() -> dict:
     config = load_config()
     runtime_manager = RuntimeManager(config.data_dir, config)
     runtime_state = runtime_manager.state
+
+    logger.info("Config: max_iterations=%d, max_runtime=%dm, quality_threshold=%d",
+                config.research_max_iterations,
+                config.research_max_runtime_minutes,
+                config.research_quality_threshold)
 
     # Dashboard output directory (GitHub Pages serves from here)
     dashboard_data = Path(__file__).parent.parent.parent / "dashboard" / "data"
@@ -154,7 +403,6 @@ def run_daily_maintenance() -> dict:
     logger.info("DIAGNOSTIC: Available providers: %s", available_providers)
 
     stats = {"registry": {"total_keys": 0, "by_status": {}}, "health": {}}
-    research_data: dict = {"findings": [], "summary": "Not yet researched"}
 
     # ── Step 1: Health check ──
     logger.info("STEP START: Health check")
@@ -177,127 +425,35 @@ def run_daily_maintenance() -> dict:
         errors.append("Health check failed")
         logger.error("STEP FAIL: Health check (%.1fs)", health_duration)
 
-    # ── Step 1a: Research planning ──
-    if config.research_planner_enabled:
-        logger.info("STEP START: Generating research plan")
-        plan = generate_research_plan(config, key_manager, runtime_state)
-        runtime_manager.state["current_plan"] = plan
-        runtime_manager.save_state()
-        logger.info("Research plan generated: Objectives=%s", plan.get("objectives", []))
-    else:
-        logger.info("Research planning is disabled.")
-
-    # ── Step 1b: Memory compression ──
-    iteration = runtime_manager.determine_current_iteration()
-    if iteration > config.memory_compression_threshold:
-        logger.info("STEP START: Memory compression")
-        compressed = compress_memory(config, key_manager, runtime_state)
-        runtime_manager.state["long_term_memory"] = compressed
-        runtime_manager.save_state()
-        logger.info("Older iterations compressed into Long-Term Memory")
-    else:
-        logger.info("Iteration count %d <= compression threshold %d. Skipping memory compression.",
-                    iteration, config.memory_compression_threshold)
-
-    # ── Step 2: Research ──
-    logger.info("STEP START: Provider research")
+    # ── Step 2: Research loop (continuous iterations) ──
+    logger.info("STEP START: Research loop")
     history_path = config.data_dir / "research_history.json"
-    research_result, research_duration = _time_step(
-        research_providers, config, key_manager, history_path, runtime_state
+    research_data, completion_reason = _run_research_loop(
+        config, key_manager, runtime_manager, history_path, overall_start
     )
-    if research_result is not _EXCEPTION:
-        research_data = research_result
-        findings_count = len(research_data.get("findings", []))
-        research_success = research_data.get("_success", True)
-        
-        if research_success:
-            iteration = runtime_manager.determine_current_iteration()
-            research_dir = config.data_dir / "research"
-            research_dir.mkdir(parents=True, exist_ok=True)
-            iter_file = research_dir / f"iteration_{iteration}.md"
-            
-            report_data = research_data.get("iteration_report", {})
-            markdown_content = f"""# Research Iteration {iteration}
+    logger.info("STEP END: Research loop — reason: %s", completion_reason)
 
-## Summary
-{report_data.get('summary', 'No summary provided.')}
-
-## Evidence
-{report_data.get('evidence', 'No evidence provided.')}
-
-## Sources
-{report_data.get('sources', 'No sources provided.')}
-
-## Confidence
-{report_data.get('confidence', 'medium')}
-
-## Assumptions
-{chr(10).join(f"- {a}" for a in report_data.get('assumptions', [])) if report_data.get('assumptions') else "None"}
-
-## Unanswered Questions
-{chr(10).join(f"- {q}" for q in report_data.get('unanswered_questions', [])) if report_data.get('unanswered_questions') else "None"}
-
-## Contradictions
-{chr(10).join(f"- {c}" for c in report_data.get('contradictions', [])) if report_data.get('contradictions') else "None"}
-
-## Recommendations for the next iteration
-{report_data.get('recommendations_next', 'None')}
-"""
-            try:
-                iter_file.write_text(markdown_content, encoding="utf-8")
-                logger.info("Saved iteration report to %s", iter_file)
-            except Exception as e:
-                logger.error("Failed to write iteration report to %s: %s", iter_file, e)
-
-            eval_data = research_data.get("evaluation", {})
-            logger.info("=== EVAL_DATA BEFORE RuntimeManager ===")
-            logger.info("type(eval_data): %s", type(eval_data).__name__)
-            logger.info("eval_data.keys(): %s", list(eval_data.keys()) if isinstance(eval_data, dict) else "NOT A DICT")
-            if isinstance(eval_data, dict):
-                logger.info("eval_data overall_quality: %s", eval_data.get("overall_quality", "MISSING"))
-                logger.info("eval_data coverage: %s", eval_data.get("coverage", "MISSING"))
-                logger.info("eval_data verification: %s", eval_data.get("verification", "MISSING"))
-                logger.info("eval_data verified_claims count: %d", len(eval_data.get("verified_claims", [])))
-            logger.info("=======================================")
-            runtime_manager.update_state(eval_data, research_data.get("findings", []))
-
-            # Upgraded Logging:
-            logger.info("=" * 40)
-            logger.info("RESEARCH ITERATION DIAGNOSTICS")
-            logger.info("  Current Iteration: %d", iteration)
-            logger.info("  Objectives: %s", runtime_state.get("current_plan", {}).get("objectives", []))
-            logger.info("  Verified Claims Count: %d", len(runtime_manager.state.get("verified_claims", [])))
-            logger.info("  Unverified Claims Count: %d", len(runtime_manager.state.get("unverified_claims", [])))
-            logger.info("  Open Questions: %s", runtime_manager.state.get("open_questions", []))
-            logger.info("  Research Queue Count: %d", len(runtime_manager.state.get("research_queue", [])))
-            logger.info("  Contradictions Count: %d", len(runtime_manager.state.get("contradictions", [])))
-            metrics = runtime_manager.state.get("quality_metrics", {})
-            logger.info("  Quality Metrics: Overall=%d, Coverage=%d, Verification=%d, SourceDiversity=%d",
-                        metrics.get("overall_quality", 0),
-                        metrics.get("coverage", 0),
-                        metrics.get("verification", 0),
-                        metrics.get("source_diversity", 0))
-            logger.info("  Metric Reason: %s", metrics.get("reason", ""))
-            logger.info("=" * 40)
-
-        step_results["research"] = {
-            "status": "ok" if research_success else "error",
-            "duration_seconds": round(research_duration, 2),
-            "findings_count": findings_count,
-            "has_llm_summary": research_data.get("has_llm_summary", False),
+    # ── Step 3: Generate final report ──
+    logger.info("STEP START: Final report generation")
+    final_report, report_duration = _time_step(
+        generate_final_report, config, key_manager, runtime_manager.state
+    )
+    if final_report is not _EXCEPTION:
+        research_data = final_report
+        step_results["final_report"] = {
+            "status": "ok",
+            "duration_seconds": round(report_duration, 2),
         }
-        if not research_success:
-            errors.append(f"Research failed: {research_data.get('summary', 'unknown reason')}")
-            logger.error("STEP FAIL: Research — %s (%.1fs)", research_data.get("summary", "unknown"), research_duration)
+        logger.info("STEP END: Final report in %.1fs", report_duration)
     else:
-        step_results["research"] = {
+        step_results["final_report"] = {
             "status": "error",
-            "duration_seconds": round(research_duration, 2),
+            "duration_seconds": round(report_duration, 2),
         }
-        errors.append("Research failed with exception")
-        logger.error("STEP FAIL: Research (%.1fs)", research_duration)
+        errors.append("Final report generation failed")
+        logger.error("STEP FAIL: Final report (%.1fs)", report_duration)
 
-    # ── Step 3: Dashboard status ──
+    # ── Step 4: Dashboard status ──
     logger.info("STEP START: Dashboard status generation")
     status_result, status_duration = _time_step(
         generate_status_json, key_manager, config, dashboard_data
@@ -316,7 +472,7 @@ def run_daily_maintenance() -> dict:
         errors.append("Dashboard status generation failed")
         logger.error("STEP FAIL: Dashboard status (%.1fs)", status_duration)
 
-    # ── Step 4: Dashboard recommendations ──
+    # ── Step 5: Dashboard recommendations ──
     logger.info("STEP START: Dashboard recommendations generation")
     recs_result, recs_duration = _time_step(
         generate_recommendations_json, research_data, dashboard_data
@@ -335,74 +491,49 @@ def run_daily_maintenance() -> dict:
         errors.append("Dashboard recommendations generation failed")
         logger.error("STEP FAIL: Dashboard recommendations (%.1fs)", recs_duration)
 
-    # ── Step 5: Email ──
-    logger.info("STEP START: Email delivery decision")
+    # ── Step 6: Email ──
+    logger.info("Generating Final Report")
+    logger.info("Sending Email")
+    logger.info("STEP START: Email delivery")
     email_result = False
     email_duration = 0.0
 
-    # Check for forced email override (debugging only)
-    force_email = os.environ.get("AIKEYPOOL_FORCE_EMAIL", "").lower() == "true"
-    if force_email:
-        logger.warning("AIKEYPOOL_FORCE_EMAIL=true — bypassing Runtime Manager decision")
-
-    # Log completion diagnostics BEFORE making decision
-    runtime_manager.log_completion_decision()
-
-    should_send = runtime_manager.should_send_email() or force_email
-    if should_send:
-        if force_email and not runtime_manager.should_send_email():
-            logger.info("FORCED: Email will be sent despite Runtime Manager decision (AIKEYPOOL_FORCE_EMAIL=true)")
-        max_iter = runtime_state.get("max_iterations", config.research_max_iterations)
-        iteration = runtime_manager.determine_current_iteration()
-        is_max_reached = iteration >= max_iter
-
-        if is_max_reached:
-            logger.info("Maximum iterations reached (%d/%d). Generating Final Report.", iteration, max_iter)
-        else:
-            logger.info("Quality targets met. Generating Final Report.")
-
-        final_report = generate_final_report(config, key_manager, runtime_manager.state)
-        research_data = final_report
-
-        logger.info("STEP START: Email delivery")
-        email_result, email_duration = _time_step(
-            _do_send_email, config, stats, research_data, errors
-        )
-        if email_result is not _EXCEPTION:
-            step_results["email"] = {
-                "status": "sent" if email_result else "skipped",
-                "duration_seconds": round(email_duration, 2),
-            }
-            logger.info("STEP END: Email — %s in %.1fs",
-                         "sent" if email_result else "skipped", email_duration)
-            logger.info("Email function was called: True")
-            runtime_manager.archive_cycle()
-        else:
-            step_results["email"] = {
-                "status": "error",
-                "duration_seconds": round(email_duration, 2),
-            }
-            errors.append("Email delivery failed — see EMAIL FAILED log above for SMTP stage details")
-            logger.error("STEP FAIL: Email (%.1fs)", email_duration)
-            logger.info("Email function was called: True (but failed)")
-            # Still archive even if email fails — guaranteed completion
-            logger.info("Archiving cycle despite email failure (guaranteed completion)")
-            runtime_manager.archive_cycle()
-    else:
-        logger.info("Email skipped (quality targets not met and iteration < max). Saving state and incrementing iteration.")
-        logger.info("Email function was called: False")
-        runtime_manager.increment_iteration()
+    email_result, email_duration = _time_step(
+        _do_send_email, config, stats, research_data, errors
+    )
+    if email_result is not _EXCEPTION:
         step_results["email"] = {
-            "status": "skipped",
-            "duration_seconds": 0.0,
+            "status": "sent" if email_result else "skipped",
+            "duration_seconds": round(email_duration, 2),
         }
+        logger.info("STEP END: Email — %s in %.1fs",
+                     "sent" if email_result else "skipped", email_duration)
+        logger.info("Email function was called: True")
+    else:
+        step_results["email"] = {
+            "status": "error",
+            "duration_seconds": round(email_duration, 2),
+        }
+        errors.append("Email delivery failed — see EMAIL FAILED log above for SMTP stage details")
+        logger.error("STEP FAIL: Email (%.1fs)", email_duration)
+        logger.info("Email function was called: True (but failed)")
+
+    # ── Step 7: Archive and reset ──
+    logger.info("STEP START: Archive and reset")
+    try:
+        runtime_manager.archive_cycle()
+        logger.info("STEP END: Cycle archived and runtime reset")
+    except Exception as e:
+        logger.error("STEP FAIL: Archive — %s", e)
+        errors.append(f"Archive failed: {e}")
 
     # ── Summary ──
     overall_duration = time.monotonic() - overall_start
     workflow_status = "completed" if not errors else "completed_with_errors"
 
     logger.info("=" * 60)
-    logger.info("AI KEY POOL DAILY MAINTENANCE — COMPLETE")
+    logger.info("Research Session Complete")
+    logger.info("Workflow Finished")
     logger.info("Workflow status: %s", workflow_status)
     logger.info("Total duration: %.1fs", overall_duration)
     logger.info("Errors: %d", len(errors))
@@ -428,6 +559,7 @@ def run_daily_maintenance() -> dict:
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "status": workflow_status,
         "duration_seconds": round(overall_duration, 2),
+        "completion_reason": completion_reason,
         "steps": step_results,
         "errors": errors,
         "diagnostics": {

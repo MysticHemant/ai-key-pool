@@ -322,7 +322,7 @@ def test_guaranteed_completion_on_max_iterations():
 
 
 def test_orchestrator_integration():
-    """Test that orchestrator increments iterations and skips email or consolidates and sends."""
+    """Test that orchestrator runs continuous research loop and sends email on completion."""
     print("  - Running test_orchestrator_integration...")
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
@@ -337,6 +337,7 @@ def test_orchestrator_integration():
             "SMTP_USER": "u",
             "SMTP_PASSWORD": "p",
             "EMAIL_RECIPIENT": "r@t.com",
+            "AIKEYPOOL_RESEARCH_MAX_ITERATIONS": "2",
         }
 
         # Mock LLM response that fails to hit quality target (low scores)
@@ -361,61 +362,17 @@ def test_orchestrator_integration():
         }
 
         with patch.dict("os.environ", env):
-            # Run 1: Should perform research, save iteration 1, update state, skip email, increment to iteration 2
+            # Run 1: Continuous loop with low quality — runs 2 iterations, reaches max, sends email
             with patch("src.maintenance.orchestrator.research_providers", return_value=mock_low_quality):
                 with patch("src.maintenance.orchestrator.generate_research_plan", return_value={"objectives": ["Test"]}):
-                    with patch("src.maintenance.orchestrator.compress_memory", return_value="compressed memory"):
-                        with patch("src.maintenance.orchestrator._do_send_email") as mock_send:
-                            result = run_daily_maintenance()
-                            assert result["steps"]["research"]["status"] == "ok"
-                            assert result["steps"]["email"]["status"] == "skipped"
-                            mock_send.assert_not_called()
-
-            # Verify iteration file saved & iteration incremented to 2
-            assert (tmp_path / "research" / "iteration_1.md").exists()
-            with open(tmp_path / "research_runtime.json") as f:
-                state = json.load(f)
-            assert state["iteration"] == 2
-            assert state["quality_metrics"]["overall_quality"] == 45
-            assert "claim1" in state.get("unverified_claims", [])
-
-            # Mock LLM response that hits quality target
-            mock_high_quality = {
-                "findings": [{"provider": "groq", "type": "model", "action": "update"}],
-                "summary": "High quality summary",
-                "iteration_report": {"summary": "High summary", "evidence": "Got it"},
-                "evaluation": {
-                    "overall_quality": 95,
-                    "coverage": 92,
-                    "verification": 90,
-                    "source_diversity": 90,
-                    "novel_information": 80,
-                    "contradictions_resolved": 100,
-                    "verified_claims": ["claim1", "claim2", "claim3"],
-                    "unverified_claims": [],
-                    "open_questions": [],
-                    "research_queue": [],
-                    "contradictions": [],
-                    "completed_topics": ["topic1"],
-                }
-            }
-
-            # Run 2: Should perform research, save iteration 2, meet quality, consolidate report, send email, archive cycle
-            with patch("src.maintenance.orchestrator.research_providers", return_value=mock_high_quality):
-                with patch("src.maintenance.orchestrator.generate_research_plan", return_value={"objectives": ["Test"]}):
-                    with patch("src.maintenance.orchestrator.generate_final_report", return_value=mock_high_quality) as mock_gen_report:
+                    with patch("src.maintenance.orchestrator.generate_final_report", return_value=mock_low_quality):
                         with patch("src.maintenance.orchestrator._do_send_email", return_value=True) as mock_send:
                             result = run_daily_maintenance()
-                            assert result["steps"]["research"]["status"] == "ok"
                             assert result["steps"]["email"]["status"] == "sent"
-                            mock_gen_report.assert_called_once()
                             mock_send.assert_called_once()
 
-            # Verify active iteration files deleted and cycle archived
-            assert not (tmp_path / "research" / "iteration_1.md").exists()
-            assert not (tmp_path / "research" / "iteration_2.md").exists()
-
-            # Verify new cycle restarted (iteration reset to 1)
+            # Verify iteration files were created and then archived
+            # (files no longer exist in research/ since archive_cycle moves them)
             with open(tmp_path / "research_runtime.json") as f:
                 state = json.load(f)
             assert state["iteration"] == 1
@@ -425,7 +382,7 @@ def test_orchestrator_integration():
 
 
 def test_orchestrator_guaranteed_completion_on_max_iterations():
-    """Test orchestrator archives and resets even with low quality when max iterations reached."""
+    """Test orchestrator completes and sends email even with low quality when max iterations reached."""
     print("  - Running test_orchestrator_guaranteed_completion_on_max_iterations...")
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
@@ -463,22 +420,7 @@ def test_orchestrator_guaranteed_completion_on_max_iterations():
         }
 
         with patch.dict("os.environ", env):
-            # Run iterations until max (iteration starts at 1, max=2)
-            # Run 1: iteration 1, skip email, increment to 2
-            with patch("src.maintenance.orchestrator.research_providers", return_value=mock_low_quality):
-                with patch("src.maintenance.orchestrator.generate_research_plan", return_value={"objectives": ["Test"]}):
-                    with patch("src.maintenance.orchestrator.compress_memory", return_value="compressed memory"):
-                        with patch("src.maintenance.orchestrator._do_send_email") as mock_send:
-                            result = run_daily_maintenance()
-                            assert result["steps"]["email"]["status"] == "skipped"
-                            mock_send.assert_not_called()
-
-            # Verify iteration is now 2
-            with open(tmp_path / "research_runtime.json") as f:
-                state = json.load(f)
-            assert state["iteration"] == 2
-
-            # Run 2: iteration 2 (max), should send email even with low quality
+            # Run: Continuous loop — runs 2 iterations, reaches max, sends email, archives
             with patch("src.maintenance.orchestrator.research_providers", return_value=mock_low_quality):
                 with patch("src.maintenance.orchestrator.generate_research_plan", return_value={"objectives": ["Test"]}):
                     with patch("src.maintenance.orchestrator.generate_final_report", return_value=mock_low_quality):

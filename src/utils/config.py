@@ -39,6 +39,8 @@ class Config:
     memory_compression_threshold: int = 4
     research_planner_enabled: bool = True
     contradiction_detection_enabled: bool = True
+    research_max_runtime_minutes: int = 45
+    research_max_api_budget: Optional[float] = None
 
 
 def load_config(config_path: Optional[Path] = None) -> Config:
@@ -77,6 +79,8 @@ def load_config(config_path: Optional[Path] = None) -> Config:
         memory_compression_threshold=int(os.environ.get("AIKEYPOOL_MEMORY_COMPRESSION_THRESHOLD", "4")),
         research_planner_enabled=_bool_env("AIKEYPOOL_RESEARCH_PLANNER_ENABLED", True),
         contradiction_detection_enabled=_bool_env("AIKEYPOOL_CONTRADICTION_DETECTION_ENABLED", True),
+        research_max_runtime_minutes=int(os.environ.get("AIKEYPOOL_RESEARCH_MAX_RUNTIME_MINUTES", "45")),
+        research_max_api_budget=float(os.environ["AIKEYPOOL_RESEARCH_MAX_API_BUDGET"]) if os.environ.get("AIKEYPOOL_RESEARCH_MAX_API_BUDGET") else None,
     )
 
     data_dir = os.environ.get("AIKEYPOOL_DATA_DIR")
