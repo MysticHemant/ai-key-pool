@@ -250,6 +250,15 @@ def run_daily_maintenance() -> dict:
                 logger.error("Failed to write iteration report to %s: %s", iter_file, e)
 
             eval_data = research_data.get("evaluation", {})
+            logger.info("=== EVAL_DATA BEFORE RuntimeManager ===")
+            logger.info("type(eval_data): %s", type(eval_data).__name__)
+            logger.info("eval_data.keys(): %s", list(eval_data.keys()) if isinstance(eval_data, dict) else "NOT A DICT")
+            if isinstance(eval_data, dict):
+                logger.info("eval_data overall_quality: %s", eval_data.get("overall_quality", "MISSING"))
+                logger.info("eval_data coverage: %s", eval_data.get("coverage", "MISSING"))
+                logger.info("eval_data verification: %s", eval_data.get("verification", "MISSING"))
+                logger.info("eval_data verified_claims count: %d", len(eval_data.get("verified_claims", [])))
+            logger.info("=======================================")
             runtime_manager.update_state(eval_data, research_data.get("findings", []))
 
             # Upgraded Logging:
@@ -331,10 +340,18 @@ def run_daily_maintenance() -> dict:
     email_result = False
     email_duration = 0.0
 
+    # Check for forced email override (debugging only)
+    force_email = os.environ.get("AIKEYPOOL_FORCE_EMAIL", "").lower() == "true"
+    if force_email:
+        logger.warning("AIKEYPOOL_FORCE_EMAIL=true — bypassing Runtime Manager decision")
+
     # Log completion diagnostics BEFORE making decision
     runtime_manager.log_completion_decision()
 
-    if runtime_manager.should_send_email():
+    should_send = runtime_manager.should_send_email() or force_email
+    if should_send:
+        if force_email and not runtime_manager.should_send_email():
+            logger.info("FORCED: Email will be sent despite Runtime Manager decision (AIKEYPOOL_FORCE_EMAIL=true)")
         max_iter = runtime_state.get("max_iterations", config.research_max_iterations)
         iteration = runtime_manager.determine_current_iteration()
         is_max_reached = iteration >= max_iter
@@ -358,6 +375,7 @@ def run_daily_maintenance() -> dict:
             }
             logger.info("STEP END: Email — %s in %.1fs",
                          "sent" if email_result else "skipped", email_duration)
+            logger.info("Email function was called: True")
             runtime_manager.archive_cycle()
         else:
             step_results["email"] = {
@@ -366,11 +384,13 @@ def run_daily_maintenance() -> dict:
             }
             errors.append("Email delivery failed — see EMAIL FAILED log above for SMTP stage details")
             logger.error("STEP FAIL: Email (%.1fs)", email_duration)
+            logger.info("Email function was called: True (but failed)")
             # Still archive even if email fails — guaranteed completion
             logger.info("Archiving cycle despite email failure (guaranteed completion)")
             runtime_manager.archive_cycle()
     else:
         logger.info("Email skipped (quality targets not met and iteration < max). Saving state and incrementing iteration.")
+        logger.info("Email function was called: False")
         runtime_manager.increment_iteration()
         step_results["email"] = {
             "status": "skipped",

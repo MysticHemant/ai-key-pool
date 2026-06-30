@@ -651,7 +651,21 @@ def _llm_summarize(
         logger.error("LLM summarization failed: %s", result.error)
         return None
 
-    return _parse_findings(result.response.content)
+    parsed = _parse_findings(result.response.content)
+
+    if parsed:
+        evaluation = parsed.get("evaluation", {})
+        logger.info("=== LLM EVALUATION ===")
+        logger.info("Overall Quality: %s", evaluation.get("overall_quality", "MISSING"))
+        logger.info("Coverage: %s", evaluation.get("coverage", "MISSING"))
+        logger.info("Verification: %s", evaluation.get("verification", "MISSING"))
+        logger.info("Verified Claims: %d", len(evaluation.get("verified_claims", [])))
+        logger.info("Open Questions: %d", len(evaluation.get("open_questions", [])))
+        logger.info("Keys in parsed result: %s", list(parsed.keys()))
+        logger.info("Keys in evaluation: %s", list(evaluation.keys()))
+        logger.info("======================")
+
+    return parsed
 
 
 def _parse_findings(content: str) -> Optional[dict]:
@@ -825,6 +839,17 @@ def research_providers(
         "yes" if summarized else "no",
         len(history["entries"]),
     )
+
+    logger.info("=== RESEARCH RESULT ===")
+    logger.info("research_result.keys(): %s", list(findings_result.keys()))
+    evaluation = findings_result.get("evaluation", {})
+    logger.info("evaluation.keys(): %s", list(evaluation.keys()) if isinstance(evaluation, dict) else "NOT A DICT: %s" % type(evaluation))
+    logger.info("type(evaluation): %s", type(evaluation).__name__)
+    if isinstance(evaluation, dict):
+        logger.info("len(verified_claims): %d", len(evaluation.get("verified_claims", [])))
+        logger.info("overall_quality: %s", evaluation.get("overall_quality", "MISSING"))
+    logger.info("=======================")
+
     return findings_result
 
 

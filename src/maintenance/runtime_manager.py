@@ -39,6 +39,8 @@ class RuntimeManager:
             try:
                 with open(self.state_file, "r") as f:
                     self.state = json.load(f)
+                logger.info("Loaded runtime iteration: %d", self.state.get("iteration", 1))
+                logger.info("Loaded runtime max_iterations: %d", self.state.get("max_iterations", self.max_iterations))
             except Exception as e:
                 logger.error("Failed to load runtime state: %s. Reinitializing.", e)
                 self.state = {}
@@ -92,6 +94,7 @@ class RuntimeManager:
         try:
             with open(self.state_file, "w") as f:
                 json.dump(self.state, f, indent=2)
+            logger.info("Saved runtime iteration: %d", self.state.get("iteration", 1))
         except Exception as e:
             logger.error("Failed to save runtime state: %s", e)
 
@@ -229,7 +232,19 @@ class RuntimeManager:
         # Path B: Guaranteed completion (max iterations reached)
         max_reached = iteration >= max_iter
 
-        return quality_met or max_reached
+        result = quality_met or max_reached
+
+        logger.info("should_send_email() CONDITIONS:")
+        logger.info("  overall_quality >= %d : %s", quality_target, overall_quality >= quality_target)
+        logger.info("  coverage >= %d : %s", min_cov, coverage >= min_cov)
+        logger.info("  verification >= %d : %s", min_ver, verification >= min_ver)
+        logger.info("  verified_claims >= %d : %s", min_verified_claims, verified_count >= min_verified_claims)
+        logger.info("  iteration >= max_iterations : %s (iteration=%d, max=%d)", max_reached, iteration, max_iter)
+        logger.info("  quality_met (Path A) : %s", quality_met)
+        logger.info("  max_reached (Path B) : %s", max_reached)
+        logger.info("should_send_email() RESULT: %s", result)
+
+        return result
 
     def log_completion_decision(self) -> None:
         """Log detailed email/completion decision diagnostics."""
@@ -257,28 +272,15 @@ class RuntimeManager:
         max_reached = iteration >= max_iter
         should_send = self.should_send_email()
 
-        logger.info("=" * 50)
-        logger.info("FINAL RUNTIME DIAGNOSTICS")
-        logger.info("")
-        logger.info("Iteration: %d / %d", iteration, max_iter)
-        logger.info("Overall Quality: %d", overall_quality)
-        logger.info("Coverage: %d", coverage)
-        logger.info("Verification: %d", verification)
-        logger.info("Verified Claims: %d", verified_count)
-        logger.info("Open Questions: %d", open_count)
-        logger.info("")
+        # Determine reason
         if should_send:
-            logger.info("Decision: Send Final Report")
-            logger.info("")
-            logger.info("Reason:")
-            if quality_met:
-                logger.info("  Quality threshold reached.")
-            if max_reached:
-                logger.info("  Maximum iterations reached.")
+            if quality_met and max_reached:
+                reason = "Quality threshold reached and maximum iterations reached."
+            elif quality_met:
+                reason = "Quality threshold reached."
+            else:
+                reason = "Maximum iterations reached."
         else:
-            logger.info("Decision: Continue Research")
-            logger.info("")
-            logger.info("Reason:")
             missing = []
             if overall_quality < quality_target:
                 missing.append("Overall quality below threshold (%d)." % quality_target)
@@ -290,10 +292,23 @@ class RuntimeManager:
                 missing.append("Verified claims below minimum (%d)." % min_verified_claims)
             if not max_reached:
                 missing.append("Iteration %d < max %d." % (iteration, max_iter))
-            for reason in missing:
-                logger.info("  %s", reason)
-        logger.info("")
-        logger.info("=" * 50)
+            reason = " ".join(missing) if missing else "Unknown reason."
+
+        logger.info("=== EMAIL DECISION ===")
+        logger.info("Iteration: %d / %d", iteration, max_iter)
+        logger.info("Overall Quality: %d", overall_quality)
+        logger.info("Coverage: %d", coverage)
+        logger.info("Verification: %d", verification)
+        logger.info("Verified Claims: %d", verified_count)
+        logger.info("Open Questions: %d", open_count)
+        logger.info("Configured max_iterations: %d", self.config.research_max_iterations)
+        logger.info("Runtime max_iterations: %d", max_iter)
+        if should_send:
+            logger.info("Decision: SEND EMAIL")
+        else:
+            logger.info("Decision: Continue Research")
+        logger.info("Reason: %s", reason)
+        logger.info("======================")
 
     @staticmethod
     def _get_claim_key(claim) -> str:
@@ -411,13 +426,33 @@ class RuntimeManager:
 
     def update_state(self, evaluation: dict, findings: list) -> None:
         """Update scores and tracking details from the latest iteration's evaluation."""
+        logger.info("RuntimeManager received evaluation:")
+        logger.info("  type(evaluation): %s", type(evaluation).__name__)
+        if isinstance(evaluation, dict):
+            logger.info("  evaluation.keys(): %s", list(evaluation.keys()))
+            logger.info("  overall_quality: %s", evaluation.get("overall_quality", "MISSING"))
+            logger.info("  coverage: %s", evaluation.get("coverage", "MISSING"))
+            logger.info("  verification: %s", evaluation.get("verification", "MISSING"))
+            logger.info("  verified_claims count: %d", len(evaluation.get("verified_claims", [])))
+            logger.info("  open_questions count: %d", len(evaluation.get("open_questions", [])))
+        else:
+            logger.warning("  evaluation is not a dict: %s", repr(evaluation))
+
         # Validate and normalize quality metrics
-        raw_metrics = evaluation.get("evaluation", evaluation)
-        if "evaluation" in evaluation:
+        # Handle both flat (orchestrator passes evaluation dict directly)
+        # and nested (evaluation contains an "evaluation" sub-dict) formats
+        if "evaluation" in evaluation and isinstance(evaluation.get("evaluation"), dict):
             raw_metrics = evaluation["evaluation"]
+            logger.info("  Using nested evaluation sub-dict")
+        else:
+            raw_metrics = evaluation
+            logger.info("  Using evaluation dict directly (flat format)")
 
         validated_metrics = self._validate_quality_metrics(raw_metrics)
         self.state["quality_metrics"] = validated_metrics
+        logger.info("  After validation: overall_quality=%d, coverage=%d, verification=%d",
+                     validated_metrics["overall_quality"], validated_metrics["coverage"],
+                     validated_metrics["verification"])
 
         # Update legacy scalar scores
         self.state["quality_score"] = validated_metrics["overall_quality"]
@@ -447,7 +482,9 @@ class RuntimeManager:
 
     def increment_iteration(self) -> None:
         """Move to the next iteration step."""
-        self.state["iteration"] = self.state.get("iteration", 1) + 1
+        prev = self.state.get("iteration", 1)
+        self.state["iteration"] = prev + 1
+        logger.info("Incremented runtime iteration: %d -> %d", prev, self.state["iteration"])
         self.save_state()
 
     def archive_cycle(self) -> None:
