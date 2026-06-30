@@ -473,9 +473,9 @@ The report below shows system health and provider status only.
 
     if suggested:
         html += '<h2>Recommended Providers to Evaluate</h2>\n'
-        html += '<p style="font-size:13px;color:#666;">Only providers not yet configured that may fill capability gaps:</p>\n'
+        html += '<p style="font-size:13px;color:#666;">Providers not yet configured that address specific capability gaps:</p>\n'
         html += '<table>\n'
-        html += '<tr><th>Provider</th><th>Why Consider</th><th>Free Tier</th></tr>\n'
+        html += '<tr><th>Provider</th><th>Capability Gap Filled</th><th>Free Tier</th></tr>\n'
         seen_names = set()
         shown = 0
         for s in suggested:
@@ -486,7 +486,10 @@ The report below shows system health and provider status only.
                 continue
             seen_names.add(name)
             display = html_mod.escape(str(s.get("display_name", s.get("name", name)))) if isinstance(s, dict) else html_mod.escape(str(s))
-            why = html_mod.escape(str(s.get("why", s.get("description", "May fill capability gap"))))[:120] if isinstance(s, dict) else ""
+            # Use the new capability_gap field, fall back to why/description
+            why = ""
+            if isinstance(s, dict):
+                why = html_mod.escape(str(s.get("capability_gap", s.get("why", s.get("description", "May fill capability gap")))))[:140]
             free_tier = "Yes" if isinstance(s, dict) and s.get("free_tier") else "—"
             html += f'<tr><td><strong>{display}</strong></td>'
             html += f'<td>{why}</td>'
@@ -518,33 +521,50 @@ The report below shows system health and provider status only.
         if pname in provider_caps:
             configured_capabilities.update(provider_caps[pname])
 
+    # Determine healthy capabilities (from healthy keys)
+    healthy_capabilities = set()
+    for pname in configured_set:
+        pinfo = provider_summaries.get(pname, {})
+        if pinfo.get("healthy_keys", 0) > 0 and pname in provider_caps:
+            healthy_capabilities.update(provider_caps[pname])
+
     html += '<h2>Capability Gap Analysis</h2>\n'
     html += '<table>\n'
     html += '<tr><th>Capability</th><th>Status</th><th>Covered By</th></tr>\n'
     for cap_name, cap_id in all_capabilities:
-        covered_by = []
+        # Which configured providers support this capability
+        configured_for_cap = []
         for pname in sorted(configured_set):
             if pname in provider_caps and cap_id in provider_caps[pname]:
-                covered_by.append(pname)
+                configured_for_cap.append(pname)
 
-        if covered_by:
+        # Which of those are healthy
+        healthy_for_cap = [p for p in configured_for_cap if p in healthy_capabilities and cap_id in provider_caps.get(p, set())]
+
+        # Which all known providers support this (including not configured)
+        all_supporting = []
+        for pname, caps in provider_caps.items():
+            if cap_id in caps:
+                all_supporting.append(pname)
+
+        if healthy_for_cap:
             html += f'<tr class="gap-row"><td>{cap_name}</td>'
-            html += f'<td class="gap-covered">✓ Covered</td>'
-            html += f'<td>{", ".join(covered_by)}</td></tr>\n'
+            html += f'<td class="gap-covered">✓ Covered (healthy)</td>'
+            html += f'<td>{", ".join(healthy_for_cap)}</td></tr>\n'
+        elif configured_for_cap:
+            # Configured but unhealthy
+            html += f'<tr class="gap-row"><td>{cap_name}</td>'
+            html += f'<td style="color:#e65100;font-weight:600;">⚠ Configured (unhealthy)</td>'
+            html += f'<td>{", ".join(configured_for_cap)} — needs attention</td></tr>\n'
         else:
-            # Check if any suggested provider covers this
-            suggestions_for_cap = []
-            for s in suggested:
-                if isinstance(s, dict):
-                    s_caps = set(s.get("capabilities", []))
-                    if cap_id in s_caps:
-                        suggestions_for_cap.append(s.get("name", ""))
+            # Not covered by any configured provider
+            other_options = [p for p in all_supporting if p not in configured_set]
             html += f'<tr class="gap-row"><td>{cap_name}</td>'
             html += f'<td class="gap-missing">✗ Missing</td>'
-            if suggestions_for_cap:
-                html += f'<td style="font-size:12px;">Consider: {", ".join(suggestions_for_cap[:2])}</td>'
+            if other_options:
+                html += f'<td style="font-size:12px;">Available: {", ".join(other_options[:3])}</td>'
             else:
-                html += '<td style="font-size:12px;color:#999;">No provider available</td>'
+                html += '<td style="font-size:12px;color:#999;">No known provider offers this</td>'
             html += '</tr>\n'
     html += '</table>\n'
 
@@ -561,47 +581,82 @@ The report below shows system health and provider status only.
         phealthy = pinfo.get("healthy_keys", 0)
         pexhausted = pinfo.get("exhausted_keys", 0)
         pdisabled = pinfo.get("disabled_keys", 0)
+        plast_error = pinfo.get("last_error", "")
+        pfailure_count = pinfo.get("failure_count", 0)
 
-        # Determine status and action
+        # Get manifest health for failure details
+        manifest_health = (provider_health or {}).get(pname, "unknown")
+        manifest_obj = manifest_registry.get(pname) if manifest_registry else None
+        last_check = ""
+        last_error = ""
+        if manifest_obj and hasattr(manifest_obj, 'health'):
+            mh = manifest_obj.health
+            if isinstance(mh, dict):
+                last_check = mh.get("last_check", "")
+                last_error = mh.get("last_error", "")
+
+        # Determine status, action, and failure reason
         if ptotal == 0:
             status_str = "Not Configured"
             status_cls = ""
             reliability = "—"
             action = "Add API keys"
+            failure_reason = ""
         elif phealthy > 0:
             status_str = "Healthy"
             status_cls = "ok"
             reliability = f"{phealthy}/{ptotal} keys"
             action = "No action needed"
+            failure_reason = ""
         elif pexhausted > 0:
             status_str = "Exhausted"
             status_cls = "warn"
             reliability = "0 healthy"
             action = "Add new keys or wait for rate limit reset"
+            failure_reason = "All keys rate-limited or quota exhausted"
         elif pdisabled > 0:
             status_str = "Disabled"
             status_cls = "error"
             reliability = "0 healthy"
             action = "Investigate failures, re-enable keys"
+            failure_reason = plast_error or last_error or f"{pfailure_count} consecutive failures" if pfailure_count else "Keys disabled due to errors"
         else:
+            # Unknown state — try to explain why
             status_str = "Unknown"
             status_cls = ""
             reliability = "—"
             action = "Check key configuration"
+            failure_reason = ""
+            if manifest_health == "unhealthy":
+                status_str = "Unhealthy"
+                status_cls = "error"
+                failure_reason = last_error or "Provider marked unhealthy"
+                action = "Replace keys or check provider status"
+            elif manifest_health == "degraded":
+                status_str = "Degraded"
+                status_cls = "warn"
+                failure_reason = last_error or "Provider performance degraded"
+                action = "Monitor and consider fallback"
+            elif last_error:
+                failure_reason = last_error
 
-        # Add failure reason from manifest health
-        manifest_health = provider_health.get(pname, "unknown") if provider_health else "unknown"
+        # Override with manifest health if worse
         if manifest_health == "unhealthy" and phealthy == 0:
             status_str = "Unhealthy"
             status_cls = "error"
             action = "Replace keys or check provider status"
+            if not failure_reason:
+                failure_reason = last_error or "Provider health check failed"
 
         html += f'<tr><td><strong>{html_mod.escape(pname)}</strong></td>'
         html += f'<td>{ptotal}</td>'
         html += f'<td>{phealthy}</td>'
         html += f'<td class="{status_cls}">{status_str}</td>'
         html += f'<td>{reliability}</td>'
-        html += f'<td style="font-size:12px;">{html_mod.escape(action)}</td></tr>\n'
+        action_text = html_mod.escape(action)
+        if failure_reason:
+            action_text += f' <span style="color:#999;font-size:11px;">({html_mod.escape(failure_reason[:80])})</span>'
+        html += f'<td style="font-size:12px;">{action_text}</td></tr>\n'
 
     html += '</table>\n'
 
@@ -622,6 +677,8 @@ The report below shows system health and provider status only.
                     "provider": f.get("provider", ""),
                     "category": f.get("category", ""),
                     "confidence": f.get("confidence", "medium"),
+                    "business_impact": f.get("description", f.get("claim", ""))[:150],
+                    "recommended_action": "Review",
                     "why_it_matters": f.get("description", f.get("claim", ""))[:150],
                 })
                 if len(top_developments) >= 5:
@@ -634,12 +691,18 @@ The report below shows system health and provider status only.
                 provider = html_mod.escape(str(dev.get("provider", "")))
                 confidence = html_mod.escape(str(dev.get("confidence", "medium")))
                 why = html_mod.escape(str(dev.get("why_it_matters", "")))
+                business_impact = html_mod.escape(str(dev.get("business_impact", "")))
+                rec_action = html_mod.escape(str(dev.get("recommended_action", "")))
                 conf_class = f"tag-{confidence}"
                 html += f'<div class="development-card">\n'
                 html += f'  <div class="development-title">{i}. {title}</div>\n'
                 html += f'  <div class="development-meta">{provider} &middot; <span class="tag {conf_class}">{confidence}</span></div>\n'
+                if business_impact:
+                    html += f'  <p style="font-size:13px;color:#444;margin-top:6px;"><strong>Business Impact:</strong> {business_impact}</p>\n'
                 if why:
-                    html += f'  <p style="font-size:13px;color:#444;margin-top:6px;">{why}</p>\n'
+                    html += f'  <p style="font-size:13px;color:#444;margin-top:2px;">{why}</p>\n'
+                if rec_action:
+                    html += f'  <p style="font-size:12px;color:#1565c0;margin-top:4px;"><strong>Action:</strong> {rec_action}</p>\n'
                 html += '</div>\n'
 
     # ═══════════════════════════════════════════════════════════
