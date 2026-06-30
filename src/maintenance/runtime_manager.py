@@ -1007,17 +1007,18 @@ class RuntimeManager:
         if self.state_file.exists():
             shutil.copy2(self.state_file, archive_dir / "research_runtime.json")
 
-        # Archive the iteration files
+        # Archive the iteration files (both .md and _findings.json)
         research_dir = self.data_dir / "research"
         if research_dir.exists():
             archive_research_dir = archive_dir / "research"
             archive_research_dir.mkdir(parents=True, exist_ok=True)
-            for f in research_dir.glob("iteration_*.md"):
-                shutil.copy2(f, archive_research_dir / f.name)
-                try:
-                    f.unlink()
-                except Exception as e:
-                    logger.warning("Could not delete iteration file %s: %s", f, e)
+            for pattern in ["iteration_*.md", "iteration_*_findings.json"]:
+                for f in research_dir.glob(pattern):
+                    shutil.copy2(f, archive_research_dir / f.name)
+                    try:
+                        f.unlink()
+                    except Exception as e:
+                        logger.warning("Could not delete iteration file %s: %s", f, e)
 
         logger.info("Archived cycle %s to %s", cycle_id, archive_dir)
         self.reset_state()

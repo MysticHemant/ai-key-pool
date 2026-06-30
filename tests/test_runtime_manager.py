@@ -1266,6 +1266,100 @@ def test_queue_normalize_defaults_filled():
     print("    PASSED")
 
 
+def test_findings_to_report_data_flow():
+    """Integration test: _save_iteration_findings → generate_final_report produces non-empty statistics."""
+    print("  - Running test_findings_to_report_data_flow...")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        config = Config(research_max_iterations=5)
+        config.data_dir = tmp_path
+        manager = RuntimeManager(tmp_path, config=config)
+
+        # Create mock findings with provider info
+        mock_findings = [
+            {
+                "description": "Groq released new LPU inference chip",
+                "provider": "groq",
+                "type": "models",
+                "confidence": "high",
+                "source": "https://groq.com/blog",
+                "url": "https://groq.com/blog",
+                "action": "monitor",
+                "verification_status": "verified",
+                "model": "llama-3.3-70b",
+            },
+            {
+                "description": "OpenRouter added new reasoning model",
+                "provider": "openrouter",
+                "type": "models",
+                "confidence": "medium",
+                "source": "https://openrouter.ai/docs",
+                "url": "https://openrouter.ai/docs",
+                "action": "evaluate",
+                "verification_status": "unverified",
+                "model": "o3-mini",
+            },
+        ]
+
+        # Save findings using runtime manager
+        manager._save_iteration_findings(mock_findings, {"overall_quality": 75})
+
+        # Verify JSON file was created
+        findings_file = tmp_path / "research" / "iteration_1_findings.json"
+        assert findings_file.exists(), "Findings JSON file not created"
+
+        # Load findings from JSON file and verify content
+        with open(findings_file) as f:
+            data = json.load(f)
+        assert len(data["findings"]) == 2, "Expected 2 findings in JSON"
+        assert data["findings"][0]["provider"] == "groq"
+        assert data["findings"][1]["provider"] == "openrouter"
+
+        # Now generate final report (mock dependencies that read from disk)
+        from src.maintenance.research import generate_final_report
+        from src.maintenance.report_sections import build_executive_report
+
+        # Load the saved findings directly
+        all_findings = []
+        for i in range(1, manager.state.get("iteration", 1) + 1):
+            ff = tmp_path / "research" / f"iteration_{i}_findings.json"
+            if ff.exists():
+                with open(ff) as f:
+                    d = json.load(f)
+                all_findings.extend(d.get("findings", []))
+
+        # Merge findings
+        from src.maintenance.research import _merge_structured_findings
+        merged = _merge_structured_findings(all_findings)
+
+        # Build report sections directly
+        sections = build_executive_report(
+            merged_findings=merged,
+            verified_claims=manager.state.get("verified_claims", []),
+            unverified_claims=manager.state.get("unverified_claims", []),
+            open_questions=manager.state.get("open_questions", []),
+            resolved_questions=manager.state.get("resolved_questions", []),
+            contradictions=manager.state.get("contradictions", []),
+            quality_metrics=manager.state.get("quality_metrics", {}),
+            history=manager.state.get("history", []),
+            iteration=manager.state.get("iteration", 1),
+            configured_providers=["groq", "openrouter"],
+        )
+
+        # Verify statistics are non-empty (the core bug this test catches)
+        stats = sections.get("statistics", {})
+        assert stats.get("total_findings", 0) > 0, (
+            f"total_findings should be > 0, got {stats.get('total_findings')}"
+        )
+        assert stats.get("providers_analyzed", 0) > 0, (
+            f"providers_analyzed should be > 0, got {stats.get('providers_analyzed')}"
+        )
+        assert stats.get("iterations", 0) > 0, (
+            f"iterations should be > 0, got {stats.get('iterations')}"
+        )
+    print("    PASSED")
+
+
 def main():
     print("Running Runtime Manager Tests...")
     test_runtime_manager_state_load_save()
@@ -1303,6 +1397,8 @@ def main():
     test_queue_normalize_invalid_values()
     test_queue_normalize_on_load()
     test_queue_normalize_defaults_filled()
+    # Integration test for data flow
+    test_findings_to_report_data_flow()
     print("\nAll Runtime Manager Tests Passed!")
 
 

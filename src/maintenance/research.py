@@ -945,7 +945,7 @@ def research_providers(
         logger.info("STEP END: LLM summarization in %.1fs", elapsed)
 
     # Step 3: Build final result
-    if summarized:
+    if summarized and summarized.get("findings"):
         findings_result = summarized
         findings_result["_raw_count"] = len(raw_findings)
         findings_result["_success"] = True
