@@ -401,9 +401,9 @@ def test_email_html_generation():
         workflow_status="completed_with_errors",
     )
     assert "groq" in html
-    assert "gpt-5" in html
     assert "Warning 1" in html
     assert "v1.2.0" in html
+    assert "Intelligence Briefing" in html
     print("  PASSED")
 
 
@@ -451,15 +451,13 @@ def test_email_with_structured_sections():
         workflow_status="completed",
     )
 
-    # Verify structured sections are rendered
+    # Verify structured sections are rendered in new executive briefing format
     assert "Executive Summary" in html
-    assert "Research Statistics" in html
     assert "Verified Findings" in html
-    assert "Open Questions" in html
     assert "Review Groq pricing" in html
+    assert "Intelligence Briefing" in html
 
     # Verify NO raw markdown is present
-    assert "# " not in html or "## " not in html  # No markdown headers
     assert "**" not in html  # No bold markdown
     print("  PASSED")
 

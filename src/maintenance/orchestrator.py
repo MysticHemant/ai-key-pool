@@ -68,59 +68,91 @@ def _log_startup_diagnostics(
 ) -> None:
     """Log provider diagnostics before maintenance begins.
 
-    Logs all detected providers, key counts, health status, the selected
-    active provider, and reasons for skipping any provider.  Never logs
-    actual API key values.
+    Shows a clear provider summary table with status for each provider.
+    Filters empty provider IDs. Reports exactly why each provider was skipped.
+    Never logs actual API key values.
     """
+    from ..providers.manifest import manifest_registry
+
     registry = key_manager.registry
     health = key_manager.health_checker
 
-    # ── All detected providers ──
-    logger.info("STARTUP DIAGNOSTICS: %d provider(s) detected via env", len(available_providers))
-    for name in sorted(available_providers):
-        kind = provider_status.get(name, "unknown")
-        logger.info("  [%s] type=%s", name, kind)
-
-    # ── Keys loaded per provider ──
-    registry_stats = registry.get_stats()
-    by_provider = registry_stats.get("by_provider", {})
-
-    if not by_provider:
-        logger.warning("STARTUP DIAGNOSTICS: No keys loaded for any provider")
-    else:
-        logger.info("STARTUP DIAGNOSTICS: Keys loaded by provider:")
-        for pname in sorted(by_provider):
-            pinfo = by_provider[pname]
-            logger.info(
-                "  [%s] total=%d active=%d exhausted=%d disabled=%d",
-                pname, pinfo["total"],
-                pinfo.get("active", 0), pinfo.get("exhausted", 0), pinfo.get("disabled", 0),
-            )
-
-    # ── Health status per provider ──
-    health_stats = health.get_stats()
-    logger.info(
-        "STARTUP DIAGNOSTICS: Health — healthy=%d, degraded=%d, unhealthy=%d, unknown=%d",
-        health_stats.get("healthy", 0),
-        health_stats.get("degraded", 0),
-        health_stats.get("unhealthy", 0),
-        health_stats.get("unknown", 0),
-    )
+    # Collect all known providers: manifest registry + config providers + available
+    all_provider_ids = set()
+    all_provider_ids.update(manifest_registry.list_provider_ids())
+    all_provider_ids.update(config.providers.keys())
+    all_provider_ids.update(available_providers)
+    all_provider_ids.discard("")  # Filter empty provider IDs
 
     # Per-provider healthy key count
-    all_healthy = set(health.get_all_healthy_keys())
+    all_healthy_keys = set(health.get_all_healthy_keys())
     healthy_by_provider: dict[str, int] = {}
     for key_id, entry in registry.keys.items():
-        if key_id in all_healthy:
+        if key_id in all_healthy_keys:
             healthy_by_provider.setdefault(entry.provider, 0)
             healthy_by_provider[entry.provider] += 1
 
-    for pname in sorted(by_provider):
-        total = by_provider[pname]["total"]
-        h_count = healthy_by_provider.get(pname, 0)
-        logger.info("  [%s] healthy_keys=%d/%d", pname, h_count, total)
+    registry_stats = registry.get_stats()
+    by_provider = registry_stats.get("by_provider", {})
 
-    # ── Active provider selection ──
+    # ── Provider Summary Table ──
+    logger.info("STARTUP DIAGNOSTICS: Provider Summary")
+    logger.info("─" * 60)
+
+    for pname in sorted(all_provider_ids):
+        if not pname or not pname.strip():
+            continue  # Skip empty provider IDs
+
+        manifest = manifest_registry.get(pname)
+        has_keys = pname in config.providers and len(config.providers[pname].keys) > 0
+        key_count = len(config.providers[pname].keys) if has_keys else 0
+        healthy_count = healthy_by_provider.get(pname, 0)
+        total_in_registry = by_provider.get(pname, {}).get("total", 0)
+        is_configured = has_keys or total_in_registry > 0
+
+        # Determine health status
+        if manifest:
+            health_status = manifest.health
+        elif healthy_count > 0:
+            health_status = "healthy"
+        elif total_in_registry > 0:
+            # Check if all keys are unhealthy/disabled
+            pinfo = by_provider.get(pname, {})
+            active_count = pinfo.get("active", 0)
+            if active_count > 0:
+                health_status = "healthy"
+            else:
+                health_status = "unhealthy"
+        else:
+            health_status = "not configured"
+
+        # Determine skip reason
+        skip_reason = ""
+        if not is_configured:
+            skip_reason = "missing key"
+        elif healthy_count == 0 and total_in_registry > 0:
+            skip_reason = "all keys unhealthy or disabled"
+
+        # Log provider line
+        if is_configured and health_status in ("healthy", "unknown"):
+            logger.info(
+                "  ✓ %s — configured, %s, %d key(s)",
+                pname, health_status, key_count,
+            )
+        elif is_configured:
+            logger.info(
+                "  ✗ %s — configured, %s, %d key(s)",
+                pname, health_status, key_count,
+            )
+        else:
+            logger.info(
+                "  ✗ %s — not configured, reason: %s",
+                pname, skip_reason or "no keys",
+            )
+
+    logger.info("─" * 60)
+
+    # ── Active provider ──
     active = config.active_provider
     if active:
         active_keys = registry.get_healthy_keys(active)
@@ -131,31 +163,21 @@ def _log_startup_diagnostics(
             )
         else:
             logger.warning(
-                "STARTUP DIAGNOSTICS: Active provider = [%s] but NO healthy keys available — "
-                "LLM calls will fail",
+                "STARTUP DIAGNOSTICS: Active provider = [%s] but NO healthy keys — LLM calls will fail",
                 active,
             )
     else:
-        logger.warning("STARTUP DIAGNOSTICS: No active provider configured (AIKEYPOOL_ACTIVE_PROVIDER unset)")
+        logger.warning("STARTUP DIAGNOSTICS: No active provider (AIKEYPOOL_ACTIVE_PROVIDER unset)")
 
-    # ── Skipped providers (detected but not active) ──
-    registered = set(registry.get_all_providers())
-    detected_not_registered = set(available_providers) - registered
-    registered_not_detected = registered - set(available_providers)
-
-    for pname in sorted(detected_not_registered):
-        reason = "no keys loaded (env var missing or empty)"
-        logger.info("STARTUP DIAGNOSTICS: [%s] SKIPPED — %s", pname, reason)
-
-    for pname in sorted(registered_not_detected):
-        entry_count = len(registry.get_keys_for_provider(pname))
-        healthy_count = len(registry.get_healthy_keys(pname))
-        if healthy_count == 0:
-            reason = "all keys unhealthy or disabled"
-        else:
-            reason = "detected in registry but not in provider factory"
-        logger.info("STARTUP DIAGNOSTICS: [%s] SKIPPED — %s (keys=%d, healthy=%d)",
-                     pname, reason, entry_count, healthy_count)
+    # ── Health summary ──
+    health_stats = health.get_stats()
+    logger.info(
+        "STARTUP DIAGNOSTICS: Health — healthy=%d, degraded=%d, unhealthy=%d, unknown=%d",
+        health_stats.get("healthy", 0),
+        health_stats.get("degraded", 0),
+        health_stats.get("unhealthy", 0),
+        health_stats.get("unknown", 0),
+    )
 
 
 def _run_single_iteration(
@@ -749,7 +771,8 @@ def run_daily_maintenance() -> dict:
     email_duration = 0.0
 
     email_result, email_duration = _time_step(
-        _do_send_email, config, stats, research_data, errors
+        _do_send_email, config, stats, research_data, errors,
+        available_providers, discovery_results if discovery_result is not _EXCEPTION else None,
     )
     if email_result is not _EXCEPTION:
         step_results["email"] = {
@@ -845,8 +868,12 @@ def _do_send_email(
     stats: dict,
     research_data: dict,
     errors: list[str],
+    available_providers: list[str] = None,
+    discovery_results: dict = None,
 ) -> bool:
     """Send email. Returns True if sent, False if skipped."""
+    from ..providers.manifest import manifest_registry
+
     status_data = {
         "active_provider": config.active_provider,
         "total_keys": stats["registry"]["total_keys"],
@@ -862,6 +889,14 @@ def _do_send_email(
             "healthy_keys": pdata["active"],
         }
 
+    # Provider health from manifest registry
+    provider_health = {}
+    for manifest in manifest_registry.get_all().values():
+        provider_health[manifest.provider_id] = manifest.health
+
+    # Configured providers list
+    configured_providers = list(config.providers.keys())
+
     try:
         return send_daily_summary(
             smtp_host=os.environ.get("SMTP_HOST", ""),
@@ -872,6 +907,9 @@ def _do_send_email(
             status=status_data,
             recommendations=research_data,
             errors=errors,
+            configured_providers=configured_providers,
+            discovery_results=discovery_results,
+            provider_health=provider_health,
         )
     except EmailDeliveryError as e:
         logger.error("EMAIL FAILED at stage '%s': %s", e.stage, e.detail)

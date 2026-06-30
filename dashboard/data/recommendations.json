@@ -7,5 +7,262 @@
   "pricing_changes": [],
   "free_tier_changes": [],
   "breaking_changes": [],
+  "suggested_providers": [
+    {
+      "name": "github",
+      "endpoint": "",
+      "models": [
+        "free-gpt-4-1106520284967735316",
+        "gpt-4",
+        "20Providers-15"
+      ],
+      "free_tier": true,
+      "source": "cool-ai-stuff",
+      "confidence": "medium"
+    },
+    {
+      "name": "Hyperbolic",
+      "endpoint": "",
+      "models": [],
+      "free_tier": true,
+      "source": "free-llm-api-resources",
+      "confidence": "medium"
+    },
+    {
+      "name": "Scaleway Generative APIs",
+      "endpoint": "",
+      "models": [],
+      "free_tier": true,
+      "source": "free-llm-api-resources",
+      "confidence": "medium"
+    },
+    {
+      "name": "cloudflare",
+      "endpoint": "",
+      "models": [
+        "granite-4",
+        "gemma-sea-lion-v4-27b",
+        "gemma-4-26b",
+        "Phi-4"
+      ],
+      "free_tier": true,
+      "source": "free-llm-api-resources",
+      "confidence": "medium"
+    },
+    {
+      "name": "AI21",
+      "endpoint": "",
+      "models": [],
+      "free_tier": false,
+      "source": "free-llm-api-resources",
+      "confidence": "medium"
+    },
+    {
+      "name": "Baseten",
+      "endpoint": "",
+      "models": [],
+      "free_tier": false,
+      "source": "free-llm-api-resources",
+      "confidence": "medium"
+    },
+    {
+      "name": "OpenCode Zen",
+      "endpoint": "",
+      "models": [],
+      "free_tier": true,
+      "source": "free-llm-api-resources",
+      "confidence": "medium"
+    },
+    {
+      "name": "Google AI Studio",
+      "endpoint": "",
+      "models": [
+        "qwen3-next-80b"
+      ],
+      "free_tier": true,
+      "source": "free-llm-api-resources",
+      "confidence": "medium"
+    },
+    {
+      "name": "Mistral (Codestral)",
+      "endpoint": "",
+      "models": [],
+      "free_tier": true,
+      "source": "free-llm-api-resources",
+      "confidence": "medium"
+    },
+    {
+      "name": "Inference.net",
+      "endpoint": "",
+      "models": [],
+      "free_tier": false,
+      "source": "free-llm-api-resources",
+      "confidence": "medium"
+    },
+    {
+      "name": "Upstage",
+      "endpoint": "",
+      "models": [],
+      "free_tier": false,
+      "source": "free-llm-api-resources",
+      "confidence": "medium"
+    },
+    {
+      "name": "Vercel AI Gateway",
+      "endpoint": "",
+      "models": [],
+      "free_tier": false,
+      "source": "free-llm-api-resources",
+      "confidence": "medium"
+    },
+    {
+      "name": "Cloudflare Workers AI",
+      "endpoint": "",
+      "models": [
+        "gemma-sea-lion-v4-27b",
+        "Phi-4"
+      ],
+      "free_tier": true,
+      "source": "free-llm-api-resources",
+      "confidence": "medium"
+    },
+    {
+      "name": "NVIDIA NIM",
+      "endpoint": "",
+      "models": [],
+      "free_tier": false,
+      "source": "free-llm-api-resources",
+      "confidence": "medium"
+    },
+    {
+      "name": "novita",
+      "endpoint": "",
+      "models": [],
+      "free_tier": false,
+      "source": "free-llm-api-resources",
+      "confidence": "medium"
+    },
+    {
+      "name": "Mistral (La Plateforme)",
+      "endpoint": "",
+      "models": [],
+      "free_tier": true,
+      "source": "free-llm-api-resources",
+      "confidence": "medium"
+    },
+    {
+      "name": "mistral",
+      "endpoint": "",
+      "models": [
+        "llama-3.2-3b-instruct",
+        "mistral-small-3.2-24b-instruct-2506",
+        "Meta-Llama-3.1-8B-Instruct",
+        "qwen3-235b-a22b-instruct-2507",
+        "qwen3-coder-30b",
+        "GPT-4",
+        "holo2-30b",
+        "gemma-4-26b",
+        "gpt-oss-120b",
+        "dolphin-mistral-24b"
+      ],
+      "free_tier": true,
+      "source": "free-llm-api-resources",
+      "confidence": "medium"
+    },
+    {
+      "name": "NLP Cloud",
+      "endpoint": "",
+      "models": [],
+      "free_tier": false,
+      "source": "free-llm-api-resources",
+      "confidence": "medium"
+    },
+    {
+      "name": "Cerebras",
+      "endpoint": "",
+      "models": [
+        "gpt-oss-120b"
+      ],
+      "free_tier": true,
+      "source": "free-llm-api-resources",
+      "confidence": "medium"
+    },
+    {
+      "name": "HuggingFace Inference Providers",
+      "endpoint": "",
+      "models": [],
+      "free_tier": false,
+      "source": "free-llm-api-resources",
+      "confidence": "medium"
+    },
+    {
+      "name": "Modal",
+      "endpoint": "",
+      "models": [
+        "Phi-4"
+      ],
+      "free_tier": false,
+      "source": "free-llm-api-resources",
+      "confidence": "medium"
+    },
+    {
+      "name": "sambanova",
+      "endpoint": "",
+      "models": [
+        "qwen3-coder-480b"
+      ],
+      "free_tier": true,
+      "source": "free-llm-api-resources",
+      "confidence": "medium"
+    },
+    {
+      "name": "SambaNova Cloud",
+      "endpoint": "",
+      "models": [
+        "qwen3-coder-480b"
+      ],
+      "free_tier": true,
+      "source": "free-llm-api-resources",
+      "confidence": "medium"
+    },
+    {
+      "name": "Nebius",
+      "endpoint": "",
+      "models": [],
+      "free_tier": false,
+      "source": "free-llm-api-resources",
+      "confidence": "medium"
+    },
+    {
+      "name": "Alibaba Cloud (International) Model Studio",
+      "endpoint": "",
+      "models": [],
+      "free_tier": false,
+      "source": "free-llm-api-resources",
+      "confidence": "medium"
+    },
+    {
+      "name": "nvidia",
+      "endpoint": "",
+      "models": [
+        "nemotron-3-nano-omni-30b",
+        "lfm-2.5-1",
+        "nemotron-3-super-120b",
+        "nemotron-3-120b",
+        "gpt-oss-20b",
+        "nemotron-3",
+        "nemotron-nano-12b",
+        "qwen3-30b",
+        "nemotron-3-nano-30b",
+        "gpt-oss-120b"
+      ],
+      "free_tier": true,
+      "source": "free-llm-api-resources",
+      "confidence": "medium"
+    }
+  ],
+  "configured_providers": [
+    "groq"
+  ],
   "summary": "Low quality"
 }

@@ -13,6 +13,7 @@ from .base_provider import BaseProvider
 from .github_models import GitHubModelsProvider
 from .groq import GroqProvider
 from .openrouter import OpenRouterProvider
+from .gemini import GeminiProvider
 from .manifest import ManifestRegistry, manifest_registry, ProviderManifest
 from ..utils.logger import get_logger
 
@@ -24,6 +25,7 @@ _BUILTIN_PROVIDERS: dict[str, type[BaseProvider]] = {
     "github_models": GitHubModelsProvider,
     "groq": GroqProvider,
     "openrouter": OpenRouterProvider,
+    "gemini": GeminiProvider,
 }
 
 # Providers known to be OpenAI-compatible (use generic adapter)

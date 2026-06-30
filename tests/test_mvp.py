@@ -20,6 +20,7 @@ from src.providers.provider_factory import create_provider, list_providers
 from src.providers.github_models import GitHubModelsProvider
 from src.providers.groq import GroqProvider
 from src.providers.openrouter import OpenRouterProvider
+from src.providers.gemini import GeminiProvider
 
 
 DATA_DIR = Path(__file__).parent.parent / "data"
@@ -42,6 +43,7 @@ def test_provider_factory():
     assert "github_models" in providers
     assert "groq" in providers
     assert "openrouter" in providers
+    assert "gemini" in providers
 
     p = create_provider("groq")
     assert isinstance(p, GroqProvider)
@@ -52,6 +54,11 @@ def test_provider_factory():
 
     p = create_provider("github_models")
     assert isinstance(p, GitHubModelsProvider)
+
+    p = create_provider("gemini")
+    assert isinstance(p, GeminiProvider)
+    assert p.get_provider_name() == "gemini"
+    assert "gemini" in p.get_manifest().provider_id
 
     try:
         create_provider("nonexistent")
@@ -68,6 +75,7 @@ def test_provider_endpoint_urls():
     assert "github.ai" in GitHubModelsProvider().get_endpoint()
     assert "groq.com" in GroqProvider().get_endpoint()
     assert "openrouter.ai" in OpenRouterProvider().get_endpoint()
+    assert "generativelanguage.googleapis.com" in GeminiProvider().get_endpoint()
     print("  PASSED")
 
 
