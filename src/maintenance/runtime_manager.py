@@ -290,17 +290,47 @@ class RuntimeManager:
             logger.info("  Reason: %s", "; ".join(reasons))
         logger.info("=" * 50)
 
+    @staticmethod
+    def _get_claim_key(claim) -> str:
+        """Extract a stable string identifier from a claim.
+
+        Supports both formats:
+        - Legacy string: "Claim A" -> "Claim A"
+        - Structured dict: {"claim": "Claim A", ...} -> "Claim A"
+
+        Returns str(claim) as fallback for any other type.
+        """
+        if isinstance(claim, dict):
+            return str(claim.get("claim", claim.get("id", claim.get("text", ""))))
+        return str(claim)
+
+    @staticmethod
+    def _get_claim_map(claims: list) -> dict[str, any]:
+        """Build a mapping from claim key -> claim object.
+
+        Preserves metadata (confidence, source, evidence, etc.).
+        If multiple claims share the same key, the last one wins.
+        """
+        result = {}
+        for claim in claims:
+            if isinstance(claim, dict):
+                key = str(claim.get("claim", claim.get("id", claim.get("text", ""))))
+            else:
+                key = str(claim)
+            result[key] = claim
+        return result
+
     def _update_claim_tracking(self, evaluation: dict) -> None:
         """Update claim tracking lists from evaluation.
 
-        - Remove items completed this iteration from open lists
-        - Promote resolved items to completed lists
-        - Avoid re-researching verified claims
+        Uses claim text/claim field as stable identifier for deduplication.
+        Never builds sets directly from dictionaries.
+        Preserves claim metadata (confidence, source, evidence, etc.).
         """
-        # Get current state lists
-        prev_verified = set(self.state.get("verified_claims", []))
-        prev_resolved = set(self.state.get("resolved_questions", []))
-        prev_completed = set(self.state.get("completed_topics", []))
+        # Build maps from current state (key -> claim object)
+        prev_verified_map = self._get_claim_map(self.state.get("verified_claims", []))
+        prev_resolved_map = self._get_claim_map(self.state.get("resolved_questions", []))
+        prev_completed_map = self._get_claim_map(self.state.get("completed_topics", []))
 
         # Get new evaluation lists
         new_verified = evaluation.get("verified_claims", [])
@@ -311,48 +341,56 @@ class RuntimeManager:
         new_queue = evaluation.get("research_queue", [])
         new_contradictions = evaluation.get("contradictions", [])
 
-        # Merge verified claims (keep as strings or dicts)
-        all_verified = set(prev_verified)
+        # Merge verified claims (keep metadata from new, fall back to existing)
         for claim in new_verified:
-            if isinstance(claim, dict):
-                all_verified.add(claim.get("claim", str(claim)))
-            else:
-                all_verified.add(str(claim))
+            key = self._get_claim_key(claim)
+            if key:
+                prev_verified_map[key] = claim
 
-        # Merge resolved questions
-        all_resolved = set(prev_resolved)
+        # Merge resolved questions (keep metadata if present)
         for q in new_resolved:
-            all_resolved.add(str(q))
+            key = self._get_claim_key(q)
+            if key:
+                prev_resolved_map[key] = q
 
         # Merge completed topics
-        all_completed = set(prev_completed)
         for t in new_completed:
-            all_completed.add(str(t))
+            key = self._get_claim_key(t)
+            if key:
+                prev_completed_map[key] = t
 
-        # Remove from open lists items that are now verified/resolved/completed
-        verified_strings = {str(v) if isinstance(v, str) else v.get("claim", str(v)) for v in all_verified}
-        resolved_strings = all_resolved
-        completed_strings = all_completed
+        # Build key sets for filtering (only string keys, no dicts)
+        verified_keys = set(prev_verified_map.keys())
+        resolved_keys = set(prev_resolved_map.keys())
+        completed_keys = set(prev_completed_map.keys())
 
         # Filter unverified claims: remove those now verified
         filtered_unverified = []
         for claim in new_unverified:
-            claim_text = claim.get("claim", str(claim)) if isinstance(claim, dict) else str(claim)
-            if claim_text not in verified_strings:
+            claim_key = self._get_claim_key(claim)
+            if claim_key not in verified_keys:
                 filtered_unverified.append(claim)
 
         # Filter open questions: remove those now resolved
-        filtered_open = [q for q in new_open if str(q) not in resolved_strings]
+        filtered_open = []
+        for q in new_open:
+            q_key = self._get_claim_key(q)
+            if q_key not in resolved_keys:
+                filtered_open.append(q)
 
         # Filter research queue: remove completed items
-        filtered_queue = [q for q in new_queue if str(q) not in completed_strings and str(q) not in verified_strings]
+        filtered_queue = []
+        for q in new_queue:
+            q_key = self._get_claim_key(q)
+            if q_key not in completed_keys and q_key not in verified_keys:
+                filtered_queue.append(q)
 
-        # Update state
-        self.state["verified_claims"] = sorted(all_verified)
+        # Update state with merged lists (preserve metadata)
+        self.state["verified_claims"] = list(prev_verified_map.values())
         self.state["unverified_claims"] = filtered_unverified
-        self.state["resolved_questions"] = sorted(all_resolved)
+        self.state["resolved_questions"] = list(prev_resolved_map.values())
         self.state["open_questions"] = filtered_open
-        self.state["completed_topics"] = sorted(all_completed)
+        self.state["completed_topics"] = list(prev_completed_map.values())
         self.state["research_queue"] = filtered_queue
         self.state["contradictions"] = new_contradictions if isinstance(new_contradictions, list) else []
 

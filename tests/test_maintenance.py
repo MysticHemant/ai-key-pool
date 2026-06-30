@@ -704,9 +704,17 @@ def main():
     test_runtime_manager.test_orchestrator_integration()
     test_runtime_manager.test_orchestrator_guaranteed_completion_on_max_iterations()
     test_runtime_manager.test_completion_diagnostics_logging()
+    test_runtime_manager.test_claim_tracking_string_claims()
+    test_runtime_manager.test_claim_tracking_dict_claims()
+    test_runtime_manager.test_claim_tracking_mixed_claims()
+    test_runtime_manager.test_claim_tracking_duplicate_detection()
+    test_runtime_manager.test_claim_tracking_promotion_unverified_to_verified()
+    test_runtime_manager.test_claim_tracking_no_typeerror_with_dicts()
+    test_runtime_manager.test_claim_tracking_backward_compatibility()
+    test_runtime_manager.test_helper_methods()
 
     print("\n" + "=" * 50)
-    print("All 47 tests passed!")
+    print("All 54 tests passed!")
     print("=" * 50)
 
 

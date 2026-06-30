@@ -529,6 +529,381 @@ def test_completion_diagnostics_logging():
     print("    PASSED")
 
 
+def test_claim_tracking_string_claims():
+    """Test claim tracking with legacy string claims."""
+    print("  - Running test_claim_tracking_string_claims...")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        config = Config(research_max_iterations=5)
+        manager = RuntimeManager(tmp_path, config=config)
+
+        # Initialize with string claims
+        manager.state["verified_claims"] = ["Claim A", "Claim B"]
+        manager.state["unverified_claims"] = ["Claim C"]
+        manager.state["open_questions"] = ["Question 1"]
+        manager.state["resolved_questions"] = []
+        manager.state["completed_topics"] = []
+        manager.state["research_queue"] = ["Task 1"]
+
+        # Evaluation with string claims
+        evaluation = {
+            "coverage": 70, "verification": 70, "source_diversity": 70,
+            "novel_information": 70, "contradictions_resolved": 70, "overall_quality": 70,
+            "verified_claims": ["Claim A", "Claim C"],  # Claim C promoted
+            "unverified_claims": [],
+            "resolved_questions": ["Question 1"],  # Question resolved
+            "open_questions": [],
+            "completed_topics": ["Task 1"],  # Task completed
+            "research_queue": [],
+            "contradictions": [],
+        }
+
+        manager.update_state(evaluation, [])
+
+        # Verify string claims work without TypeError
+        assert "Claim A" in manager.state["verified_claims"]
+        assert "Claim C" in manager.state["verified_claims"]
+        assert "Question 1" in manager.state["resolved_questions"]
+        assert "Task 1" in manager.state["completed_topics"]
+        # Claim C removed from unverified since it's now verified
+        assert len([c for c in manager.state["unverified_claims"] if c == "Claim C"]) == 0
+        print("    PASSED")
+
+
+def test_claim_tracking_dict_claims():
+    """Test claim tracking with structured dictionary claims (the crash case)."""
+    print("  - Running test_claim_tracking_dict_claims...")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        config = Config(research_max_iterations=5)
+        manager = RuntimeManager(tmp_path, config=config)
+
+        # Initialize with dict claims - this used to crash with TypeError
+        manager.state["verified_claims"] = [
+            {"claim": "Claim A", "confidence": 95, "source": "OpenAI Blog"},
+            {"claim": "Claim B", "confidence": 80, "source": "Anthropic"},
+        ]
+        manager.state["unverified_claims"] = [
+            {"claim": "Claim C", "confidence": 50, "source": "Unknown"},
+        ]
+        manager.state["open_questions"] = ["Question 1"]
+        manager.state["resolved_questions"] = []
+        manager.state["completed_topics"] = []
+        manager.state["research_queue"] = []
+
+        # Evaluation with dict claims
+        evaluation = {
+            "coverage": 70, "verification": 70, "source_diversity": 70,
+            "novel_information": 70, "contradictions_resolved": 70, "overall_quality": 70,
+            "verified_claims": [
+                {"claim": "Claim A", "confidence": 98, "source": "OpenAI Blog", "verification_status": "verified"},
+                {"claim": "Claim C", "confidence": 75, "source": "Google AI", "verification_status": "verified"},
+            ],
+            "unverified_claims": [],
+            "resolved_questions": [{"question": "Question 1", "answer": "Resolved"}],
+            "open_questions": [],
+            "completed_topics": ["Topic 1"],
+            "research_queue": [],
+            "contradictions": [],
+        }
+
+        # This must NOT raise TypeError: unhashable type: 'dict'
+        manager.update_state(evaluation, [])
+
+        # Verify dict claims work and metadata is preserved
+        verified_keys = {RuntimeManager._get_claim_key(c) for c in manager.state["verified_claims"]}
+        assert "Claim A" in verified_keys
+        assert "Claim C" in verified_keys
+
+        # Verify metadata preserved
+        claim_a = [c for c in manager.state["verified_claims"] if RuntimeManager._get_claim_key(c) == "Claim A"][0]
+        assert claim_a["confidence"] == 98  # Updated confidence
+        assert claim_a["source"] == "OpenAI Blog"
+
+        claim_c = [c for c in manager.state["verified_claims"] if RuntimeManager._get_claim_key(c) == "Claim C"][0]
+        assert claim_c["confidence"] == 75  # Promoted from unverified
+        print("    PASSED")
+
+
+def test_claim_tracking_mixed_claims():
+    """Test claim tracking with mixed string and dictionary claims."""
+    print("  - Running test_claim_tracking_mixed_claims...")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        config = Config(research_max_iterations=5)
+        manager = RuntimeManager(tmp_path, config=config)
+
+        # Existing state has string claims
+        manager.state["verified_claims"] = ["String Claim A"]
+        manager.state["unverified_claims"] = ["String Claim B"]
+        manager.state["open_questions"] = []
+        manager.state["resolved_questions"] = []
+        manager.state["completed_topics"] = []
+        manager.state["research_queue"] = []
+
+        # Evaluation adds dict claims
+        evaluation = {
+            "coverage": 70, "verification": 70, "source_diversity": 70,
+            "novel_information": 70, "contradictions_resolved": 70, "overall_quality": 70,
+            "verified_claims": [
+                {"claim": "Dict Claim X", "confidence": 90},
+                "String Claim B",  # Promoted from unverified
+            ],
+            "unverified_claims": [],
+            "resolved_questions": [],
+            "open_questions": [],
+            "completed_topics": [],
+            "research_queue": [],
+            "contradictions": [],
+        }
+
+        # Must not crash with mixed types
+        manager.update_state(evaluation, [])
+
+        verified_keys = {RuntimeManager._get_claim_key(c) for c in manager.state["verified_claims"]}
+        assert "String Claim A" in verified_keys
+        assert "Dict Claim X" in verified_keys
+        assert "String Claim B" in verified_keys
+        print("    PASSED")
+
+
+def test_claim_tracking_duplicate_detection():
+    """Test that duplicate claims are properly detected and merged."""
+    print("  - Running test_claim_tracking_duplicate_detection...")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        config = Config(research_max_iterations=5)
+        manager = RuntimeManager(tmp_path, config=config)
+
+        # Existing verified claim
+        manager.state["verified_claims"] = [
+            {"claim": "Duplicate Claim", "confidence": 80, "source": "Source A"},
+        ]
+        manager.state["unverified_claims"] = []
+        manager.state["open_questions"] = []
+        manager.state["resolved_questions"] = []
+        manager.state["completed_topics"] = []
+        manager.state["research_queue"] = []
+
+        # Evaluation adds same claim with updated metadata
+        evaluation = {
+            "coverage": 70, "verification": 70, "source_diversity": 70,
+            "novel_information": 70, "contradictions_resolved": 70, "overall_quality": 70,
+            "verified_claims": [
+                {"claim": "Duplicate Claim", "confidence": 95, "source": "Source B"},
+            ],
+            "unverified_claims": [],
+            "resolved_questions": [],
+            "open_questions": [],
+            "completed_topics": [],
+            "research_queue": [],
+            "contradictions": [],
+        }
+
+        manager.update_state(evaluation, [])
+
+        # Should only have one claim, with updated metadata
+        dup_claims = [c for c in manager.state["verified_claims"]
+                      if RuntimeManager._get_claim_key(c) == "Duplicate Claim"]
+        assert len(dup_claims) == 1
+        assert dup_claims[0]["confidence"] == 95  # Updated
+        assert dup_claims[0]["source"] == "Source B"  # Updated
+        print("    PASSED")
+
+
+def test_claim_tracking_promotion_unverified_to_verified():
+    """Test that claims are properly promoted from unverified to verified."""
+    print("  - Running test_claim_tracking_promotion_unverified_to_verified...")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        config = Config(research_max_iterations=5)
+        manager = RuntimeManager(tmp_path, config=config)
+
+        manager.state["verified_claims"] = []
+        manager.state["unverified_claims"] = [
+            {"claim": "Promoted Claim", "confidence": 30, "source": "Uncertain"},
+            {"claim": "Stays Unverified", "confidence": 20, "source": "Unknown"},
+        ]
+        manager.state["open_questions"] = []
+        manager.state["resolved_questions"] = []
+        manager.state["completed_topics"] = []
+        manager.state["research_queue"] = []
+
+        evaluation = {
+            "coverage": 70, "verification": 70, "source_diversity": 70,
+            "novel_information": 70, "contradictions_resolved": 70, "overall_quality": 70,
+            "verified_claims": [
+                {"claim": "Promoted Claim", "confidence": 92, "source": "Official Blog", "verification_status": "verified"},
+            ],
+            "unverified_claims": [
+                {"claim": "Stays Unverified", "confidence": 25, "source": "Unknown"},
+            ],
+            "resolved_questions": [],
+            "open_questions": [],
+            "completed_topics": [],
+            "research_queue": [],
+            "contradictions": [],
+        }
+
+        manager.update_state(evaluation, [])
+
+        # Promoted Claim should be in verified with updated metadata
+        promoted = [c for c in manager.state["verified_claims"]
+                    if RuntimeManager._get_claim_key(c) == "Promoted Claim"]
+        assert len(promoted) == 1
+        assert promoted[0]["confidence"] == 92
+        assert promoted[0]["source"] == "Official Blog"
+
+        # Stays Unverified should remain in unverified
+        stays = [c for c in manager.state["unverified_claims"]
+                 if RuntimeManager._get_claim_key(c) == "Stays Unverified"]
+        assert len(stays) == 1
+        assert stays[0]["confidence"] == 25
+        print("    PASSED")
+
+
+def test_claim_tracking_no_typeerror_with_dicts():
+    """Regression test: verify no TypeError with dict claims (the original crash)."""
+    print("  - Running test_claim_tracking_no_typeerror_with_dicts...")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        config = Config(research_max_iterations=5)
+        manager = RuntimeManager(tmp_path, config=config)
+
+        # Simulate the exact scenario that caused the crash
+        manager.state["verified_claims"] = [
+            {
+                "claim": "OpenAI released GPT-5",
+                "confidence": 91,
+                "source": "https://openai.com/blog",
+                "verification_status": "verified",
+                "evidence": "Direct announcement on official blog"
+            },
+            {
+                "claim": "Anthropic released Claude 4",
+                "confidence": 85,
+                "source": "https://anthropic.com/news",
+                "verification_status": "verified"
+            }
+        ]
+
+        evaluation = {
+            "coverage": 70, "verification": 70, "source_diversity": 70,
+            "novel_information": 70, "contradictions_resolved": 70, "overall_quality": 70,
+            "verified_claims": [
+                {
+                    "claim": "OpenAI released GPT-5",
+                    "confidence": 95,
+                    "source": "https://openai.com/blog",
+                    "verification_status": "verified"
+                },
+                {
+                    "claim": "Google released Gemini 3",
+                    "confidence": 88,
+                    "source": "https://blog.google/technology/ai/",
+                    "verification_status": "verified"
+                }
+            ],
+            "unverified_claims": [],
+            "resolved_questions": [],
+            "open_questions": [],
+            "completed_topics": [],
+            "research_queue": [],
+            "contradictions": [],
+        }
+
+        # Must not raise TypeError: unhashable type: 'dict'
+        try:
+            manager.update_state(evaluation, [])
+        except TypeError as e:
+            raise AssertionError(f"TypeError raised (the original crash): {e}")
+
+        # Verify state is correct
+        verified_keys = {RuntimeManager._get_claim_key(c) for c in manager.state["verified_claims"]}
+        assert "OpenAI released GPT-5" in verified_keys
+        assert "Anthropic released Claude 4" in verified_keys
+        assert "Google released Gemini 3" in verified_keys
+        assert len(manager.state["verified_claims"]) == 3
+        print("    PASSED")
+
+
+def test_claim_tracking_backward_compatibility():
+    """Test backward compatibility with older runtime_state.json formats."""
+    print("  - Running test_claim_tracking_backward_compatibility...")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        config = Config(research_max_iterations=5)
+        manager = RuntimeManager(tmp_path, config=config)
+
+        # Simulate loading an old state with all-string lists
+        manager.state["verified_claims"] = ["Old Claim 1", "Old Claim 2"]
+        manager.state["unverified_claims"] = ["Old Unverified"]
+        manager.state["open_questions"] = ["Old Question"]
+        manager.state["resolved_questions"] = ["Old Resolved"]
+        manager.state["completed_topics"] = ["Old Topic"]
+        manager.state["research_queue"] = ["Old Task"]
+
+        # New evaluation with new-format claims
+        evaluation = {
+            "coverage": 70, "verification": 70, "source_diversity": 70,
+            "novel_information": 70, "contradictions_resolved": 70, "overall_quality": 70,
+            "verified_claims": [
+                "Old Claim 1",  # String (legacy)
+                {"claim": "New Claim", "confidence": 90},  # Dict (new)
+            ],
+            "unverified_claims": ["Old Unverified"],
+            "resolved_questions": ["Old Resolved"],
+            "open_questions": ["New Question"],
+            "completed_topics": ["Old Topic"],
+            "research_queue": ["New Task"],
+            "contradictions": [],
+        }
+
+        # Must handle both formats without error
+        manager.update_state(evaluation, [])
+
+        # Verify mixed formats coexist
+        verified_keys = {RuntimeManager._get_claim_key(c) for c in manager.state["verified_claims"]}
+        assert "Old Claim 1" in verified_keys
+        assert "Old Claim 2" in verified_keys
+        assert "New Claim" in verified_keys
+        print("    PASSED")
+
+
+def test_helper_methods():
+    """Test _get_claim_key and _get_claim_map helper methods."""
+    print("  - Running test_helper_methods...")
+    # Test _get_claim_key
+    assert RuntimeManager._get_claim_key("string claim") == "string claim"
+    assert RuntimeManager._get_claim_key({"claim": "dict claim"}) == "dict claim"
+    assert RuntimeManager._get_claim_key({"id": "id-based"}) == "id-based"
+    assert RuntimeManager._get_claim_key({"text": "text-based"}) == "text-based"
+    assert RuntimeManager._get_claim_key({}) == ""  # Empty dict fallback
+    assert RuntimeManager._get_claim_key(42) == "42"  # Non-string fallback
+
+    # Test _get_claim_map
+    claims = [
+        "String Claim",
+        {"claim": "Dict Claim A", "confidence": 90},
+        {"claim": "Dict Claim B", "confidence": 80},
+    ]
+    claim_map = RuntimeManager._get_claim_map(claims)
+    assert claim_map["String Claim"] == "String Claim"
+    assert claim_map["Dict Claim A"]["confidence"] == 90
+    assert claim_map["Dict Claim B"]["confidence"] == 80
+    assert len(claim_map) == 3
+
+    # Test _get_claim_map with duplicates (last wins)
+    dup_claims = [
+        {"claim": "Dup", "confidence": 50},
+        {"claim": "Dup", "confidence": 90},
+    ]
+    dup_map = RuntimeManager._get_claim_map(dup_claims)
+    assert len(dup_map) == 1
+    assert dup_map["Dup"]["confidence"] == 90
+    print("    PASSED")
+
+
 def main():
     print("Running Runtime Manager Tests...")
     test_runtime_manager_state_load_save()
@@ -540,6 +915,14 @@ def main():
     test_orchestrator_integration()
     test_orchestrator_guaranteed_completion_on_max_iterations()
     test_completion_diagnostics_logging()
+    test_claim_tracking_string_claims()
+    test_claim_tracking_dict_claims()
+    test_claim_tracking_mixed_claims()
+    test_claim_tracking_duplicate_detection()
+    test_claim_tracking_promotion_unverified_to_verified()
+    test_claim_tracking_no_typeerror_with_dicts()
+    test_claim_tracking_backward_compatibility()
+    test_helper_methods()
     print("\nAll Runtime Manager Tests Passed!")
 
 
