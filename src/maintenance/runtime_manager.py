@@ -59,6 +59,8 @@ class RuntimeManager:
 
         if not self.state or not self.state.get("cycle_id"):
             self.reset_state()
+
+        self._normalize_queue()
         return self.state
 
     def reset_state(self) -> None:
@@ -563,6 +565,54 @@ class RuntimeManager:
         logger.info("Incremented runtime iteration: %d -> %d", prev, self.state["iteration"])
         self.save_state()
 
+    # ─── Queue Normalization ─────────────────────────────────────────────
+
+    @staticmethod
+    def _normalize_queue_item(item):
+        """Convert a queue item to the standard dict format.
+
+        Accepts:
+            dict  – returned as-is (with defaults filled in)
+            str   – converted to {"topic": item, "status": "pending", ...}
+            None / other – skipped (returns None)
+
+        Returns:
+            dict or None
+        """
+        if isinstance(item, dict):
+            item.setdefault("topic", "")
+            item.setdefault("status", "pending")
+            item.setdefault("priority", 2)
+            item.setdefault("category", "exploration")
+            return item
+        if isinstance(item, str):
+            return {
+                "topic": item,
+                "status": "pending",
+                "priority": 2,
+                "category": "exploration",
+            }
+        logger.warning("QUEUE NORMALIZE: Skipping invalid queue item: %r", item)
+        return None
+
+    def _normalize_queue(self) -> None:
+        """Normalize all items in the research queue in-place.
+
+        Legacy string items are converted to dicts. Invalid items are removed.
+        """
+        raw = self.state.get("research_queue", [])
+        normalized = []
+        for item in raw:
+            fixed = self._normalize_queue_item(item)
+            if fixed is not None:
+                normalized.append(fixed)
+        if len(normalized) != len(raw):
+            logger.warning(
+                "QUEUE NORMALIZE: %d items normalized (was %d, now %d)",
+                len(raw) - len(normalized), len(raw), len(normalized),
+            )
+        self.state["research_queue"] = normalized
+
     # ─── Research Queue Management ───────────────────────────────────────
 
     def initialize_research_queue(self) -> None:
@@ -903,7 +953,7 @@ class RuntimeManager:
         open_q = self.state.get("open_questions", [])
         contradictions = self.state.get("contradictions", [])
         queue = self.state.get("research_queue", [])
-        pending = [i for i in queue if i.get("status") == "pending"]
+        pending = [i for i in queue if isinstance(i, dict) and i.get("status") == "pending"]
 
         # Priority: contradictions > unverified claims > open questions > new sources
         if contradictions:

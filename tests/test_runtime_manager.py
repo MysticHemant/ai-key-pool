@@ -1091,6 +1091,181 @@ def test_findings_history_tracking():
     print("    PASSED")
 
 
+# ─── Queue Normalization Tests ─────────────────────────────────────────────
+
+
+def test_queue_normalize_all_dicts():
+    """Test that a queue containing only dicts is unchanged."""
+    print("  - Running test_queue_normalize_all_dicts...")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        config = Config(research_max_iterations=5)
+        manager = RuntimeManager(tmp_path, config=config)
+
+        manager.state["research_queue"] = [
+            {"topic": "A", "status": "pending", "priority": 1, "category": "exploration"},
+            {"topic": "B", "status": "completed", "priority": 2, "category": "verification"},
+        ]
+        manager._normalize_queue()
+
+        queue = manager.state["research_queue"]
+        assert len(queue) == 2
+        assert queue[0]["topic"] == "A"
+        assert queue[1]["topic"] == "B"
+        assert queue[0].get("status") == "pending"
+        assert queue[1].get("status") == "completed"
+    print("    PASSED")
+
+
+def test_queue_normalize_all_strings():
+    """Test that a queue containing only strings is auto-converted."""
+    print("  - Running test_queue_normalize_all_strings...")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        config = Config(research_max_iterations=5)
+        manager = RuntimeManager(tmp_path, config=config)
+
+        manager.state["research_queue"] = [
+            "Check Anthropic pricing",
+            "Verify Gemini free tier",
+        ]
+        manager._normalize_queue()
+
+        queue = manager.state["research_queue"]
+        assert len(queue) == 2
+        assert isinstance(queue[0], dict)
+        assert isinstance(queue[1], dict)
+        assert queue[0]["topic"] == "Check Anthropic pricing"
+        assert queue[0]["status"] == "pending"
+        assert queue[0]["priority"] == 2
+        assert queue[0]["category"] == "exploration"
+        assert queue[1]["topic"] == "Verify Gemini free tier"
+    print("    PASSED")
+
+
+def test_queue_normalize_mixed():
+    """Test that a queue with mixed strings and dicts is normalized."""
+    print("  - Running test_queue_normalize_mixed...")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        config = Config(research_max_iterations=5)
+        manager = RuntimeManager(tmp_path, config=config)
+
+        manager.state["research_queue"] = [
+            {"topic": "A", "status": "pending", "priority": 1, "category": "verification"},
+            "Legacy item",
+            {"topic": "C", "status": "completed"},
+        ]
+        manager._normalize_queue()
+
+        queue = manager.state["research_queue"]
+        assert len(queue) == 3
+        assert isinstance(queue[0], dict) and queue[0]["topic"] == "A"
+        assert isinstance(queue[1], dict) and queue[1]["topic"] == "Legacy item"
+        assert isinstance(queue[2], dict) and queue[2]["topic"] == "C"
+    print("    PASSED")
+
+
+def test_queue_normalize_empty():
+    """Test that an empty queue is handled gracefully."""
+    print("  - Running test_queue_normalize_empty...")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        config = Config(research_max_iterations=5)
+        manager = RuntimeManager(tmp_path, config=config)
+
+        manager.state["research_queue"] = []
+        manager._normalize_queue()
+
+        assert manager.state["research_queue"] == []
+    print("    PASSED")
+
+
+def test_queue_normalize_invalid_values():
+    """Test that invalid queue items (None, int, etc.) are skipped."""
+    print("  - Running test_queue_normalize_invalid_values...")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        config = Config(research_max_iterations=5)
+        manager = RuntimeManager(tmp_path, config=config)
+
+        manager.state["research_queue"] = [
+            {"topic": "Valid", "status": "pending"},
+            None,
+            42,
+            "Good item",
+            [1, 2, 3],
+        ]
+        manager._normalize_queue()
+
+        queue = manager.state["research_queue"]
+        assert len(queue) == 2
+        assert queue[0]["topic"] == "Valid"
+        assert queue[1]["topic"] == "Good item"
+    print("    PASSED")
+
+
+def test_queue_normalize_on_load():
+    """Test that queue is normalized automatically when state is loaded from disk."""
+    print("  - Running test_queue_normalize_on_load...")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        config = Config(research_max_iterations=5)
+
+        # Manually write state with legacy string queue items
+        state_file = tmp_path / "research_runtime.json"
+        raw_state = {
+            "cycle_id": "20260630_120000_test12345",
+            "iteration": 3,
+            "max_iterations": 5,
+            "status": "researching",
+            "quality_score": 0,
+            "coverage_score": 0,
+            "confidence_score": 0,
+            "completed_topics": [],
+            "research_questions": [],
+            "assumptions": [],
+            "history": [],
+            "final_report_ready": False,
+            "verified_claims": [],
+            "unverified_claims": [],
+            "resolved_questions": [],
+            "open_questions": [],
+            "research_queue": ["Old string item", 42, None],
+            "contradictions": [],
+            "long_term_memory": "",
+            "current_plan": {},
+            "quality_metrics": {
+                "coverage": 0, "verification": 0, "source_diversity": 0,
+                "novel_information": 0, "contradictions_resolved": 0,
+                "overall_quality": 0, "reason": "Initial state"
+            },
+            "findings_history": [],
+        }
+        with open(state_file, "w") as f:
+            json.dump(raw_state, f)
+
+        # Load — queue should be normalized automatically
+        manager = RuntimeManager(tmp_path, config=config)
+        queue = manager.state["research_queue"]
+
+        assert len(queue) == 1
+        assert isinstance(queue[0], dict)
+        assert queue[0]["topic"] == "Old string item"
+        assert queue[0]["status"] == "pending"
+    print("    PASSED")
+
+
+def test_queue_normalize_defaults_filled():
+    """Test that _normalize_queue_item fills in missing defaults."""
+    print("  - Running test_queue_normalize_defaults_filled...")
+    item = RuntimeManager._normalize_queue_item({"topic": "Test"})
+    assert item["status"] == "pending"
+    assert item["priority"] == 2
+    assert item["category"] == "exploration"
+    print("    PASSED")
+
+
 def main():
     print("Running Runtime Manager Tests...")
     test_runtime_manager_state_load_save()
@@ -1120,6 +1295,14 @@ def main():
     test_iteration_similarity_partial()
     test_strategy_shift_suggestion()
     test_findings_history_tracking()
+    # Queue normalization tests
+    test_queue_normalize_all_dicts()
+    test_queue_normalize_all_strings()
+    test_queue_normalize_mixed()
+    test_queue_normalize_empty()
+    test_queue_normalize_invalid_values()
+    test_queue_normalize_on_load()
+    test_queue_normalize_defaults_filled()
     print("\nAll Runtime Manager Tests Passed!")
 
 

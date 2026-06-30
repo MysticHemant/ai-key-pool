@@ -259,7 +259,7 @@ def _run_single_iteration(
     logger.info("  Open Questions: %d", len(runtime_manager.state.get("open_questions", [])))
     logger.info("  Queue Items Pending: %d",
                 len([i for i in runtime_manager.state.get("research_queue", [])
-                     if i.get("status") == "pending"]))
+                     if isinstance(i, dict) and i.get("status") == "pending"]))
     logger.info("===== END ITERATION %d =====", iteration)
 
     return {
