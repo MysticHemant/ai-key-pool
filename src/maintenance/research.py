@@ -531,6 +531,9 @@ def _llm_summarize(
 ) -> Optional[dict]:
     """Use the configured AI provider to summarize raw findings.
 
+    Handles rate limits with exponential backoff. Skips gracefully
+    on exhaustion. Sends only essential state to reduce token usage.
+
     Args:
         raw_findings: Deduplicated raw findings from web sources
         config: System configuration
@@ -543,109 +546,79 @@ def _llm_summarize(
     rotator = KeyRotator(config, key_manager)
     provider_name = config.active_provider
 
-    # Diagnostic: log registry state for this provider
-    all_providers = key_manager.registry.get_all_providers()
-    healthy_keys = key_manager.registry.get_healthy_keys(provider_name)
-    all_provider_keys = key_manager.registry.get_keys_for_provider(provider_name)
-    logger.info(
-        "RESEARCH DIAGNOSTIC: provider=%s, all_providers=%s, healthy_keys=%d, all_keys=%d",
-        provider_name, all_providers, len(healthy_keys), len(all_provider_keys),
-    )
-    for k in all_provider_keys:
-        logger.info(
-            "RESEARCH DIAGNOSTIC: key=%s status=%s failure_count=%d success_count=%d",
-            k.key_id, k.status.value, k.failure_count, k.success_count,
-        )
-
     try:
         provider = create_provider(provider_name)
     except ValueError as e:
         logger.error("Cannot summarize — invalid provider: %s", e)
         return None
 
-    # Build context from raw findings
+    # Build compact context from raw findings (limit to 30 items)
     context_lines = []
-    for f in raw_findings[:60]:  # limit context size
-        line = f"[{f.get('provider', '?')}] {f.get('title', '')}"
+    for f in raw_findings[:30]:
+        provider_name_f = f.get("provider", "?")
+        title = f.get("title", "")
+        line = f"[{provider_name_f}] {title}"
         if f.get("summary"):
-            line += f" — {f['summary'][:200]}"
-        if f.get("published"):
-            line += f" (published: {f['published']})"
+            line += f" — {f['summary'][:150]}"
         if f.get("source_url"):
             line += f" ({f['source_url']})"
         context_lines.append(line)
 
     context = "\n".join(context_lines)
-    user_prompt = f"Here are the raw findings from official sources:\n\n{context}\n\n"
+    user_prompt = f"Raw findings:\n{context}\n\n"
 
-    # Read previous iterations
+    # Build compact runtime state (only essential fields, no full history dumps)
     if runtime_state:
         iteration = runtime_state.get("iteration", 1)
-        research_dir = config.data_dir / "research"
-        threshold = config.memory_compression_threshold
 
-        # Working Memory (recent iterations)
-        working_memory_start = max(1, iteration - threshold)
-        prev_iters = []
-        for i in range(working_memory_start, iteration):
-            p = research_dir / f"iteration_{i}.md"
-            if p.exists():
-                try:
-                    content = p.read_text(encoding="utf-8")
-                    prev_iters.append(f"=== WORKING MEMORY: ITERATION {i} ===\n{content}")
-                except Exception as e:
-                    logger.warning("Could not read working memory file %s: %s", p, e)
+        user_prompt += f"Iteration: {iteration}\n"
 
-        working_mem_str = "\n\n".join(prev_iters) if prev_iters else "None"
-        ltm_str = runtime_state.get("long_term_memory", "")
-        if not ltm_str:
-            ltm_str = "None"
+        # Current plan objectives (compact)
+        plan = runtime_state.get("current_plan", {})
+        objectives = plan.get("objectives", [])
+        if objectives:
+            user_prompt += f"Objectives: {json.dumps(objectives[:5])}\n"
 
-        plan_str = json.dumps(runtime_state.get("current_plan", {}), indent=2)
+        # Unresolved items only (compact lists)
+        unverified = runtime_state.get("unverified_claims", [])
+        if unverified:
+            items = [RuntimeManager._get_claim_key(c) if hasattr(RuntimeManager, '_get_claim_key') else str(c)[:80] for c in unverified[:5]]
+            user_prompt += f"Unverified claims: {json.dumps(items)}\n"
 
-        user_prompt += "=== CURRENT PLAN ===\n"
-        user_prompt += f"{plan_str}\n\n"
+        open_q = runtime_state.get("open_questions", [])
+        if open_q:
+            user_prompt += f"Open questions: {json.dumps([str(q)[:80] for q in open_q[:5]])}\n"
 
-        user_prompt += "=== RUNTIME STATE ===\n"
-        user_prompt += f"Current Iteration: {runtime_state.get('iteration', 1)}\n"
-        user_prompt += f"Verified Claims: {runtime_state.get('verified_claims', [])}\n"
-        user_prompt += f"Unverified Claims: {runtime_state.get('unverified_claims', [])}\n"
-        user_prompt += f"Open Questions: {runtime_state.get('open_questions', [])}\n"
-        user_prompt += f"Research Queue: {runtime_state.get('research_queue', [])}\n"
-        user_prompt += f"Contradictions Tracker: {runtime_state.get('contradictions', [])}\n\n"
+        contradictions = runtime_state.get("contradictions", [])
+        unresolved = [c for c in contradictions if isinstance(c, dict) and c.get("resolution_status") != "resolved"]
+        if unresolved:
+            user_prompt += f"Unresolved contradictions: {json.dumps([str(c.get('claim', c))[:80] for c in unresolved[:3]])}\n"
 
-        user_prompt += "=== LONG-TERM MEMORY (COMPRESSED SUMMARY OF PAST WORK) ===\n"
-        user_prompt += f"{ltm_str}\n\n"
-
-        user_prompt += "=== WORKING MEMORY (RECENT RESEARCH ITERATIONS) ===\n"
-        user_prompt += f"{working_mem_str}\n\n"
+        # Compressed memory only (no raw iteration files)
+        ltm = runtime_state.get("long_term_memory", "")
+        if ltm:
+            user_prompt += f"Long-term memory: {ltm[:500]}\n"
 
         user_prompt += (
-            "Based on the plan, working memory, long-term memory, claims, and open questions, "
-            "perform the next level of research. Specifically address:\n"
-            "- What information is still missing?\n"
-            "- Which assumptions may be incorrect?\n"
-            "- Which claims require verification?\n"
-            "- Which sources disagree?\n"
-            "- What should be researched next?\n"
-            "- How can this report become more complete?\n\n"
+            "\nAnalyze the findings. Address gaps, verify claims, resolve contradictions. "
+            "Identify new providers, models, pricing changes, deprecations.\n"
         )
 
-    user_prompt += "Analyze and produce the JSON summary."
+    user_prompt += "Respond with JSON summary."
 
     messages = [
         ChatMessage(role="system", content="You are a research assistant. Respond only with valid JSON."),
         ChatMessage(role="user", content=f"{RESEARCH_PROMPT}\n\n{user_prompt}"),
     ]
 
-    # Use the provider's own default model — never hardcode OpenAI model names
     model = provider.get_default_model()
     logger.info("RESEARCH: Using provider=%s model=%s", provider_name, model)
 
     def request_fn(api_key: str):
         return provider.chat(api_key, model, messages)
 
-    result = rotator.execute_with_rotation(provider_name, request_fn)
+    # Execute with rate limit handling
+    result = _execute_with_rate_limit_retry(rotator, provider_name, request_fn, config)
 
     if not result.success or not result.response:
         logger.error("LLM summarization failed: %s", result.error)
@@ -661,11 +634,55 @@ def _llm_summarize(
         logger.info("Verification: %s", evaluation.get("verification", "MISSING"))
         logger.info("Verified Claims: %d", len(evaluation.get("verified_claims", [])))
         logger.info("Open Questions: %d", len(evaluation.get("open_questions", [])))
-        logger.info("Keys in parsed result: %s", list(parsed.keys()))
-        logger.info("Keys in evaluation: %s", list(evaluation.keys()))
         logger.info("======================")
 
     return parsed
+
+
+def _execute_with_rate_limit_retry(rotator, provider_name, request_fn, config, max_rate_limit_retries=3):
+    """Execute a request with rate limit backoff and graceful skip.
+
+    When all keys are exhausted due to 429, sleeps with exponential backoff
+    and retries. If still exhausted, returns a failure result (no crash).
+
+    Args:
+        rotator: KeyRotator instance
+        provider_name: Provider name
+        request_fn: Request function
+        config: Config instance
+        max_rate_limit_retries: Number of backoff retries after initial rotation exhaustion
+
+    Returns:
+        RotationResult
+    """
+    import time
+
+    result = rotator.execute_with_rotation(provider_name, request_fn)
+
+    if result.success:
+        return result
+
+    # If failed due to rate limit / no healthy keys, try backoff
+    error = result.error or ""
+    is_rate_limit = "no healthy keys" in error.lower() or "rate" in error.lower()
+
+    if is_rate_limit and max_rate_limit_retries > 0:
+        logger.warning("Rate limit hit — backing off before retry (%d retries left)", max_rate_limit_retries)
+        backoff_seconds = 2 ** (max_rate_limit_retries)  # 8, 4, 2
+        time.sleep(min(backoff_seconds, 10))  # cap at 10s
+
+        # Try again — keys may have cooled down
+        result = rotator.execute_with_rotation(provider_name, request_fn)
+        if result.success:
+            return result
+
+        # Recurse with fewer retries
+        return _execute_with_rate_limit_retry(
+            rotator, provider_name, request_fn, config,
+            max_rate_limit_retries=max_rate_limit_retries - 1,
+        )
+
+    return result
 
 
 def _parse_findings(content: str) -> Optional[dict]:
@@ -971,44 +988,41 @@ def _normalize_research_result(res: dict) -> dict:
 def generate_research_plan(config: Config, key_manager: KeyManager, runtime_state: dict) -> dict:
     """Generate a structured research plan before research begins using the LLM.
 
-    Uses Runtime State to create targeted objectives based on current gaps.
+    Reuses the previous plan if nothing significant changed (no new contradictions,
+    questions, or queue changes). Handles rate limits gracefully.
+
+    Args:
+        config: System configuration
+        key_manager: Key manager instance
+        runtime_state: RuntimeManager state dict
+
+    Returns:
+        Research plan dict with objectives, claims_to_verify, etc.
     """
     iteration = runtime_state.get("iteration", 1)
+    current_plan = runtime_state.get("current_plan", {})
 
-    plan_prompt = """You are a research planning agent. Generate a structured research plan for iteration {iteration} of AI provider research.
+    # Check if we should reuse the previous plan
+    if _should_reuse_plan(runtime_state):
+        logger.info("PLAN REUSE: No significant changes — reusing previous plan")
+        return current_plan
 
-    Analyze the current state and generate TARGETED objectives that address specific gaps:
-    - Verified Claims: {verified_claims}
-    - Unverified Claims: {unverified_claims}
-    - Open Questions: {open_questions}
-    - Research Queue: {research_queue}
-    - Contradictions: {contradictions}
-    - Long-Term Memory Summary: {long_term_memory}
+    plan_prompt = """Research plan for iteration {iteration}. Current state:
+- Unverified claims: {unverified_claims}
+- Open questions: {open_questions}
+- Contradictions: {contradictions}
+- Queue: {research_queue}
 
-    OBJECTIVE GENERATION RULES:
-    Based on the state above, generate objectives like:
-    - "Verify unresolved claims from previous iteration" (if unverified_claims is non-empty)
-    - "Resolve detected contradictions" (if contradictions is non-empty)
-    - "Validate assumptions with independent sources" (if there are unverified claims)
-    - "Increase source diversity by checking additional provider blogs" (always relevant)
-    - "Investigate missing evidence for [specific claim]" (if claims lack evidence)
-    - "Improve confidence of weak conclusions" (always relevant)
-    - "Answer open questions: [specific question]" (if open_questions is non-empty)
+Generate 2-3 targeted objectives. Focus on unverified claims, open questions, and contradictions.
 
-    PREVENT REPETITION:
-    - Do NOT research already completed topics or verified claims
-    - Focus on open_questions and research_queue items
-    - Prioritize contradictions that need resolution
-
-    Respond ONLY with a valid JSON object (no markdown fences) containing:
-    {{
-      "objectives": ["targeted objective 1", "targeted objective 2", "targeted objective 3"],
-      "claims_to_verify": ["specific claim from unverified_claims to check"],
-      "questions_to_answer": ["specific open_question to answer"],
-      "sources_to_search": ["specific provider blogs or RSS feeds to pay attention to"],
-      "expected_deliverables": ["deliverable 1", "deliverable 2"]
-    }}
-    """
+Respond ONLY with JSON:
+{{
+  "objectives": ["objective 1", "objective 2"],
+  "claims_to_verify": ["claim to check"],
+  "questions_to_answer": ["question to answer"],
+  "sources_to_search": ["source to check"],
+  "expected_deliverables": ["deliverable 1"]
+}}"""
 
     rotator = KeyRotator(config, key_manager)
     provider_name = config.active_provider
@@ -1018,18 +1032,23 @@ def generate_research_plan(config: Config, key_manager: KeyManager, runtime_stat
         logger.error("Cannot create provider for planning: %s", e)
         return _default_plan()
 
+    # Build compact prompt — only essential state
+    unverified = runtime_state.get("unverified_claims", [])
+    open_q = runtime_state.get("open_questions", [])
+    contradictions = runtime_state.get("contradictions", [])
+    queue = runtime_state.get("research_queue", [])
+    pending = [i for i in queue if isinstance(i, dict) and i.get("status") == "pending"]
+
     formatted_prompt = plan_prompt.format(
         iteration=iteration,
-        verified_claims=json.dumps(runtime_state.get("verified_claims", [])),
-        unverified_claims=json.dumps(runtime_state.get("unverified_claims", [])),
-        open_questions=json.dumps(runtime_state.get("open_questions", [])),
-        research_queue=json.dumps(runtime_state.get("research_queue", [])),
-        contradictions=json.dumps(runtime_state.get("contradictions", [])),
-        long_term_memory=runtime_state.get("long_term_memory", "")
+        unverified_claims=json.dumps([str(c)[:80] for c in unverified[:5]]),
+        open_questions=json.dumps([str(q)[:80] for q in open_q[:5]]),
+        contradictions=json.dumps([str(c.get("claim", c))[:80] for c in contradictions[:3] if isinstance(c, dict)]),
+        research_queue=json.dumps([i.get("topic", str(i))[:60] for i in pending[:5]]),
     )
 
     messages = [
-        ChatMessage(role="system", content="You are a research planning assistant. Respond only with valid JSON."),
+        ChatMessage(role="system", content="Research planner. Respond only with valid JSON."),
         ChatMessage(role="user", content=formatted_prompt),
     ]
     model = provider.get_default_model()
@@ -1039,7 +1058,8 @@ def generate_research_plan(config: Config, key_manager: KeyManager, runtime_stat
     def request_fn(api_key: str):
         return provider.chat(api_key, model, messages)
 
-    result = rotator.execute_with_rotation(provider_name, request_fn)
+    # Execute with rate limit handling
+    result = _execute_with_rate_limit_retry(rotator, provider_name, request_fn, config)
     if not result.success or not result.response:
         logger.error("LLM planner failed: %s", result.error)
         return _default_plan()
@@ -1048,6 +1068,47 @@ def generate_research_plan(config: Config, key_manager: KeyManager, runtime_stat
     if parsed:
         return parsed
     return _default_plan()
+
+
+def _should_reuse_plan(runtime_state: dict) -> bool:
+    """Check if the previous research plan can be reused.
+
+    Returns True if nothing significant changed since the last plan:
+    - No new contradictions
+    - No new open questions
+    - No major queue changes
+    - Not the first iteration
+    """
+    iteration = runtime_state.get("iteration", 1)
+    if iteration <= 1:
+        return False
+
+    current_plan = runtime_state.get("current_plan", {})
+    if not current_plan:
+        return False
+
+    # Count current state
+    contradictions = runtime_state.get("contradictions", [])
+    unresolved = [c for c in contradictions if isinstance(c, dict) and c.get("resolution_status") != "resolved"]
+    open_q = runtime_state.get("open_questions", [])
+    unverified = runtime_state.get("unverified_claims", [])
+
+    # If there are unresolved contradictions or unverified claims, need a new plan
+    if unresolved or unverified:
+        return False
+
+    # If open questions exist but plan already addresses them, reuse
+    plan_questions = current_plan.get("questions_to_answer", [])
+    if open_q and not plan_questions:
+        return False
+
+    # If queue changed significantly, need new plan
+    queue = runtime_state.get("research_queue", [])
+    pending = [i for i in queue if isinstance(i, dict) and i.get("status") == "pending"]
+    if len(pending) > 5:
+        return False  # Too many pending items, need fresh plan
+
+    return True
 
 
 def _default_plan() -> dict:
@@ -1065,7 +1126,10 @@ def _default_plan() -> dict:
 
 
 def compress_memory(config: Config, key_manager: KeyManager, runtime_state: dict) -> str:
-    """Summarize older iterations to keep working memory small while preserving knowledge."""
+    """Summarize older iterations to keep working memory small while preserving knowledge.
+
+    Handles rate limits gracefully — returns existing memory on failure.
+    """
     iteration = runtime_state.get("iteration", 1)
     threshold = config.memory_compression_threshold
 
@@ -1089,18 +1153,17 @@ def compress_memory(config: Config, key_manager: KeyManager, runtime_state: dict
     combined_older = "\n\n".join(older_contents)
     current_ltm = runtime_state.get("long_term_memory", "")
 
-    compression_prompt = """You are a knowledge consolidation agent. Combine the existing Long-Term Memory summary with the new older research iteration reports.
+    compression_prompt = """Consolidate these older research iterations into a concise summary.
+Preserve key verified claims, timeline events, and resolutions.
+Be concise — max 300 words.
 
-    Your goal is to produce a single, highly compressed, factual summary of the historic findings. Keep it extremely concise but do not lose key verified claims, timeline events, or resolutions of past issues.
+Existing summary:
+{current_ltm}
 
-    Existing Long-Term Memory:
-    {current_ltm}
+Iterations to consolidate:
+{combined_older}
 
-    New Older Iteration Reports to consolidate:
-    {combined_older}
-
-    Respond with the consolidated, polished summary in markdown format.
-    """
+Respond with the consolidated summary."""
 
     rotator = KeyRotator(config, key_manager)
     provider_name = config.active_provider
@@ -1111,8 +1174,11 @@ def compress_memory(config: Config, key_manager: KeyManager, runtime_state: dict
         return current_ltm
 
     messages = [
-        ChatMessage(role="system", content="You are a knowledge consolidation assistant. Respond only with markdown summary."),
-        ChatMessage(role="user", content=compression_prompt.format(current_ltm=current_ltm, combined_older=combined_older)),
+        ChatMessage(role="system", content="Knowledge consolidation. Respond only with markdown summary."),
+        ChatMessage(role="user", content=compression_prompt.format(
+            current_ltm=current_ltm[:500],
+            combined_older=combined_older[:3000],
+        )),
     ]
     model = provider.get_default_model()
 
@@ -1121,7 +1187,8 @@ def compress_memory(config: Config, key_manager: KeyManager, runtime_state: dict
     def request_fn(api_key: str):
         return provider.chat(api_key, model, messages)
 
-    result = rotator.execute_with_rotation(provider_name, request_fn)
+    # Execute with rate limit handling
+    result = _execute_with_rate_limit_retry(rotator, provider_name, request_fn, config)
     if not result.success or not result.response:
         logger.error("Memory consolidation failed: %s", result.error)
         return current_ltm
@@ -1485,7 +1552,7 @@ Be specific with provider names and details. Write in a professional, concise st
     def request_fn(api_key: str):
         return provider.chat(api_key, model, messages)
 
-    result = rotator.execute_with_rotation(provider_name, request_fn)
+    result = _execute_with_rate_limit_retry(rotator, provider_name, request_fn, config)
     if not result.success or not result.response:
         logger.error("LLM narrative generation failed: %s", result.error)
         return None

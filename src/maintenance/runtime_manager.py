@@ -785,12 +785,19 @@ class RuntimeManager:
         """Extract normalized keys from findings for similarity comparison.
 
         Keys are based on provider + description/model (lowercased, stripped).
+        Tolerates None values, missing fields, and malformed findings.
         """
         keys = set()
         for f in findings:
             if isinstance(f, dict):
-                provider = f.get("provider", "").lower().strip()
-                desc = f.get("description", f.get("model", f.get("claim", ""))).lower().strip()[:100]
+                provider = (f.get("provider") or "").strip().lower()
+                desc_raw = (
+                    f.get("description")
+                    or f.get("model")
+                    or f.get("claim")
+                    or ""
+                )
+                desc = str(desc_raw).strip().lower()[:100]
                 if provider or desc:
                     keys.add(f"{provider}:{desc}")
             elif isinstance(f, str):

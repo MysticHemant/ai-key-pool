@@ -99,17 +99,22 @@ def _run_single_iteration(
 
     # Research planning (enhanced with queue context)
     if config.research_planner_enabled:
-        logger.info("Generating research plan for iteration %d", iteration)
-        plan = generate_research_plan(config, key_manager, runtime_state)
-        # Merge queue objectives with LLM plan
-        if plan.get("objectives"):
-            runtime_state["current_plan"]["objectives"] = plan["objectives"]
-        if plan.get("claims_to_verify"):
-            runtime_state["current_plan"]["claims_to_verify"] = plan["claims_to_verify"]
-        if plan.get("questions_to_answer"):
-            runtime_state["current_plan"]["questions_to_answer"] = plan["questions_to_answer"]
-        runtime_manager.save_state()
-        logger.info("Research plan: Objectives=%s", runtime_state["current_plan"].get("objectives", []))
+        # Check if plan should be reused (skips LLM call)
+        from .research import _should_reuse_plan
+        if _should_reuse_plan(runtime_state):
+            logger.info("Plan reused — skipping LLM planner (no significant changes)")
+        else:
+            logger.info("Generating research plan for iteration %d", iteration)
+            plan = generate_research_plan(config, key_manager, runtime_state)
+            # Merge queue objectives with LLM plan
+            if plan.get("objectives"):
+                runtime_state["current_plan"]["objectives"] = plan["objectives"]
+            if plan.get("claims_to_verify"):
+                runtime_state["current_plan"]["claims_to_verify"] = plan["claims_to_verify"]
+            if plan.get("questions_to_answer"):
+                runtime_state["current_plan"]["questions_to_answer"] = plan["questions_to_answer"]
+            runtime_manager.save_state()
+            logger.info("Research plan: Objectives=%s", runtime_state["current_plan"].get("objectives", []))
 
     # Memory compression
     if iteration > config.memory_compression_threshold:
