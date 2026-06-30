@@ -697,11 +697,16 @@ def main():
     import test_runtime_manager
     test_runtime_manager.test_runtime_manager_state_load_save()
     test_runtime_manager.test_runtime_manager_gating()
+    test_runtime_manager.test_runtime_manager_quality_normalization()
+    test_runtime_manager.test_runtime_manager_claim_tracking()
     test_runtime_manager.test_runtime_manager_archiving()
+    test_runtime_manager.test_guaranteed_completion_on_max_iterations()
     test_runtime_manager.test_orchestrator_integration()
+    test_runtime_manager.test_orchestrator_guaranteed_completion_on_max_iterations()
+    test_runtime_manager.test_completion_diagnostics_logging()
 
     print("\n" + "=" * 50)
-    print("All 38 tests passed!")
+    print("All 47 tests passed!")
     print("=" * 50)
 
 

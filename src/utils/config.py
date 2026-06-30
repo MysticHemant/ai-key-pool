@@ -35,6 +35,7 @@ class Config:
     research_quality_threshold: int = 90
     min_verification_score: int = 80
     min_source_diversity: int = 70
+    min_coverage: int = 80
     memory_compression_threshold: int = 4
     research_planner_enabled: bool = True
     contradiction_detection_enabled: bool = True
@@ -72,6 +73,7 @@ def load_config(config_path: Optional[Path] = None) -> Config:
         research_quality_threshold=int(os.environ.get("AIKEYPOOL_RESEARCH_QUALITY_THRESHOLD", "90")),
         min_verification_score=int(os.environ.get("AIKEYPOOL_MIN_VERIFICATION_SCORE", "80")),
         min_source_diversity=int(os.environ.get("AIKEYPOOL_MIN_SOURCE_DIVERSITY", "70")),
+        min_coverage=int(os.environ.get("AIKEYPOOL_MIN_COVERAGE", "80")),
         memory_compression_threshold=int(os.environ.get("AIKEYPOOL_MEMORY_COMPRESSION_THRESHOLD", "4")),
         research_planner_enabled=_bool_env("AIKEYPOOL_RESEARCH_PLANNER_ENABLED", True),
         contradiction_detection_enabled=_bool_env("AIKEYPOOL_CONTRADICTION_DETECTION_ENABLED", True),

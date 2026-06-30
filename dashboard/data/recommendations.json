@@ -1,49 +1,11 @@
 {
-  "research_date": "2026-06-28",
-  "findings": [
-    {
-      "provider": "",
-      "model": null,
-      "description": "New provider",
-      "url": "",
-      "type": "provider",
-      "action": "add_key",
-      "confidence": "medium",
-      "priority": "low"
-    },
-    {
-      "provider": "",
-      "model": null,
-      "description": "New model",
-      "url": "",
-      "type": "model",
-      "action": "monitor",
-      "confidence": "medium",
-      "priority": "medium"
-    }
-  ],
-  "recommendations": [
-    {
-      "priority": "medium",
-      "action": ": New model",
-      "provider": "",
-      "type": "model"
-    },
-    {
-      "priority": "low",
-      "action": ": New provider",
-      "provider": "",
-      "type": "provider"
-    }
-  ],
-  "new_providers": [
-    "TestProvider"
-  ],
-  "new_models": [
-    "gpt-5"
-  ],
+  "research_date": "2026-06-30",
+  "findings": [],
+  "recommendations": [],
+  "new_providers": [],
+  "new_models": [],
   "pricing_changes": [],
   "free_tier_changes": [],
   "breaking_changes": [],
-  "summary": "Test research"
+  "summary": "Low quality"
 }

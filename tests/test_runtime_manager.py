@@ -20,7 +20,7 @@ def test_runtime_manager_state_load_save():
     print("  - Running test_runtime_manager_state_load_save...")
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
-        
+
         # Test config
         config = Config(research_max_iterations=5)
         manager = RuntimeManager(tmp_path, config=config)
@@ -32,7 +32,7 @@ def test_runtime_manager_state_load_save():
         assert state["status"] == "researching"
         assert state["quality_score"] == 0
         assert len(state["cycle_id"]) > 0
-        
+
         # Verify new state variables exist
         assert "verified_claims" in state
         assert "unverified_claims" in state
@@ -70,7 +70,8 @@ def test_runtime_manager_gating():
             research_max_iterations=4,
             research_quality_threshold=90,
             min_verification_score=80,
-            min_source_diversity=70
+            min_source_diversity=70,
+            min_coverage=80,
         )
         manager = RuntimeManager(tmp_path, config=config)
 
@@ -81,26 +82,155 @@ def test_runtime_manager_gating():
         manager.state["quality_metrics"] = {
             "overall_quality": 95,
             "verification": 50,
-            "source_diversity": 80
+            "source_diversity": 80,
+            "coverage": 85,
         }
+        manager.state["verified_claims"] = ["claim1", "claim2", "claim3"]
         assert not manager.should_send_email()
 
-        # 3. Overall Quality >= 90, verification >= min, diversity >= min -> Email
+        # 3. Overall Quality >= 90, verification >= min, diversity >= min, coverage >= min, verified >= 3 -> Email
         manager.state["quality_metrics"] = {
             "overall_quality": 95,
             "verification": 85,
-            "source_diversity": 75
+            "source_diversity": 75,
+            "coverage": 85,
         }
+        manager.state["verified_claims"] = ["claim1", "claim2", "claim3"]
         assert manager.should_send_email()
 
-        # 4. Iteration >= max -> Email
+        # 4. Quality met but less than 3 verified claims -> No email
+        manager.state["quality_metrics"] = {
+            "overall_quality": 95,
+            "verification": 85,
+            "source_diversity": 75,
+            "coverage": 85,
+        }
+        manager.state["verified_claims"] = ["claim1"]
+        assert not manager.should_send_email()
+
+        # 5. Iteration >= max -> Email (guaranteed completion)
         manager.state["quality_metrics"] = {
             "overall_quality": 50,
             "verification": 20,
-            "source_diversity": 20
+            "source_diversity": 20,
+            "coverage": 20,
         }
+        manager.state["verified_claims"] = []
         manager.state["iteration"] = 4
         assert manager.should_send_email()
+    print("    PASSED")
+
+
+def test_runtime_manager_quality_normalization():
+    """Test quality score normalization handles 1-10 and out-of-range values."""
+    print("  - Running test_runtime_manager_quality_normalization...")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        config = Config(research_max_iterations=5)
+        manager = RuntimeManager(tmp_path, config=config)
+
+        # Test _normalize_score_to_100 (basic clamping)
+        assert manager._normalize_score_to_100(50, "test") == 50
+        assert manager._normalize_score_to_100(0, "test") == 0
+        assert manager._normalize_score_to_100(100, "test") == 100
+        assert manager._normalize_score_to_100(150, "test") == 100
+        assert manager._normalize_score_to_100(-5, "test") == 0
+        assert manager._normalize_score_to_100(None, "test") == 0
+        assert manager._normalize_score_to_100("abc", "test") == 0
+
+        # Test validate_quality_metrics with 1-10 scale (auto-detect)
+        metrics_1_10 = {
+            "coverage": 7,
+            "verification": 8,
+            "source_diversity": 6,
+            "novel_information": 5,
+            "contradictions_resolved": 9,
+            "overall_quality": 7,
+            "reason": "test 1-10 scale"
+        }
+        validated = manager._validate_quality_metrics(metrics_1_10)
+        assert validated["coverage"] == 70, f"Expected 70, got {validated['coverage']}"
+        assert validated["verification"] == 80, f"Expected 80, got {validated['verification']}"
+        assert validated["source_diversity"] == 60, f"Expected 60, got {validated['source_diversity']}"
+        assert validated["overall_quality"] == 70, f"Expected 70, got {validated['overall_quality']}"
+
+        # Test validate_quality_metrics with 0-100 scale (no normalization)
+        metrics_0_100 = {
+            "coverage": 85,
+            "verification": 72,
+            "source_diversity": 68,
+            "novel_information": 55,
+            "contradictions_resolved": 40,
+            "overall_quality": 78,
+            "reason": "test 0-100 scale"
+        }
+        validated2 = manager._validate_quality_metrics(metrics_0_100)
+        assert validated2["coverage"] == 85
+        assert validated2["verification"] == 72
+        assert validated2["overall_quality"] == 78
+
+        # Test validate_quality_metrics clamps out-of-range
+        metrics_high = {
+            "coverage": 120,
+            "verification": -5,
+            "source_diversity": 200,
+            "novel_information": 0,
+            "contradictions_resolved": 50,
+            "overall_quality": 110,
+            "reason": "out of range"
+        }
+        validated3 = manager._validate_quality_metrics(metrics_high)
+        assert validated3["coverage"] == 100
+        assert validated3["verification"] == 0
+        assert validated3["source_diversity"] == 100
+        assert validated3["overall_quality"] == 100
+    print("    PASSED")
+
+
+def test_runtime_manager_claim_tracking():
+    """Test claim tracking properly removes completed items and promotes unresolved."""
+    print("  - Running test_runtime_manager_claim_tracking...")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        config = Config(research_max_iterations=5)
+        manager = RuntimeManager(tmp_path, config=config)
+
+        # Set up initial state
+        manager.state["verified_claims"] = ["verified claim 1"]
+        manager.state["unverified_claims"] = ["unverified claim 1"]
+        manager.state["open_questions"] = ["question 1"]
+        manager.state["resolved_questions"] = []
+        manager.state["completed_topics"] = []
+
+        # Evaluation with new verified claims and resolved questions
+        evaluation = {
+            "coverage": 70,
+            "verification": 70,
+            "source_diversity": 70,
+            "novel_information": 70,
+            "contradictions_resolved": 70,
+            "overall_quality": 70,
+            "reason": "test",
+            "verified_claims": ["verified claim 1", "new verified claim"],
+            "unverified_claims": ["new unverified claim"],
+            "resolved_questions": ["question 1"],
+            "open_questions": ["new question"],
+            "completed_topics": ["completed topic 1"],
+            "research_queue": ["queue item 1"],
+            "contradictions": [],
+            "assumptions": ["assumption 1"],
+        }
+
+        manager.update_state(evaluation, [])
+
+        # Verify claim tracking updated correctly
+        assert "verified claim 1" in manager.state["verified_claims"]
+        assert "new verified claim" in manager.state["verified_claims"]
+        assert "question 1" in manager.state["resolved_questions"]
+        assert "completed topic 1" in manager.state["completed_topics"]
+        assert "new unverified claim" in manager.state["unverified_claims"]
+        assert "new question" in manager.state["open_questions"]
+        assert "queue item 1" in manager.state["research_queue"]
     print("    PASSED")
 
 
@@ -125,7 +255,9 @@ def test_runtime_manager_archiving():
         manager.update_state({
             "overall_quality": 95,
             "verification": 85,
-            "source_diversity": 85
+            "source_diversity": 85,
+            "coverage": 85,
+            "verified_claims": ["c1", "c2", "c3"],
         }, [])
 
         # Archive
@@ -147,6 +279,48 @@ def test_runtime_manager_archiving():
     print("    PASSED")
 
 
+def test_guaranteed_completion_on_max_iterations():
+    """Test that max iterations always triggers email, archive, and reset."""
+    print("  - Running test_guaranteed_completion_on_max_iterations...")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        config = Config(
+            research_max_iterations=3,
+            research_quality_threshold=90,
+            min_verification_score=80,
+            min_source_diversity=70,
+            min_coverage=80,
+        )
+        manager = RuntimeManager(tmp_path, config=config)
+
+        # Simulate iterations with low quality
+        for i in range(1, 4):
+            manager.state["iteration"] = i
+            manager.state["quality_metrics"] = {
+                "overall_quality": 30,
+                "verification": 20,
+                "source_diversity": 20,
+                "novel_information": 10,
+                "contradictions_resolved": 0,
+                "reason": "Low quality",
+            }
+            manager.state["verified_claims"] = []
+
+            if manager.should_send_email():
+                manager.state["status"] = "completed"
+                manager.state["final_report_ready"] = True
+                manager.save_state()
+                break
+
+            manager.increment_iteration()
+
+        # Should have completed on iteration 3
+        assert manager.state["status"] == "completed"
+        assert manager.state["final_report_ready"] is True
+        assert manager.state["iteration"] == 3
+    print("    PASSED")
+
+
 def test_orchestrator_integration():
     """Test that orchestrator increments iterations and skips email or consolidates and sends."""
     print("  - Running test_orchestrator_integration...")
@@ -165,18 +339,24 @@ def test_orchestrator_integration():
             "EMAIL_RECIPIENT": "r@t.com",
         }
 
-        # Mock LLM response that fails to hit quality target
+        # Mock LLM response that fails to hit quality target (low scores)
         mock_low_quality = {
             "findings": [],
             "summary": "Low quality summary",
             "iteration_report": {"summary": "Low summary", "evidence": "None"},
             "evaluation": {
-                "overall_quality": 75,
-                "coverage": 60,
-                "verification": 50,
-                "source_diversity": 50,
+                "overall_quality": 45,
+                "coverage": 40,
+                "verification": 35,
+                "source_diversity": 40,
                 "novel_information": 10,
-                "contradictions_resolved": 0
+                "contradictions_resolved": 0,
+                "verified_claims": [],
+                "unverified_claims": ["claim1"],
+                "open_questions": ["q1"],
+                "research_queue": ["r1"],
+                "contradictions": [],
+                "completed_topics": [],
             }
         }
 
@@ -196,7 +376,8 @@ def test_orchestrator_integration():
             with open(tmp_path / "research_runtime.json") as f:
                 state = json.load(f)
             assert state["iteration"] == 2
-            assert state["quality_metrics"]["overall_quality"] == 75
+            assert state["quality_metrics"]["overall_quality"] == 45
+            assert "claim1" in state.get("unverified_claims", [])
 
             # Mock LLM response that hits quality target
             mock_high_quality = {
@@ -205,11 +386,17 @@ def test_orchestrator_integration():
                 "iteration_report": {"summary": "High summary", "evidence": "Got it"},
                 "evaluation": {
                     "overall_quality": 95,
-                    "coverage": 90,
+                    "coverage": 92,
                     "verification": 90,
                     "source_diversity": 90,
                     "novel_information": 80,
-                    "contradictions_resolved": 100
+                    "contradictions_resolved": 100,
+                    "verified_claims": ["claim1", "claim2", "claim3"],
+                    "unverified_claims": [],
+                    "open_questions": [],
+                    "research_queue": [],
+                    "contradictions": [],
+                    "completed_topics": ["topic1"],
                 }
             }
 
@@ -227,7 +414,7 @@ def test_orchestrator_integration():
             # Verify active iteration files deleted and cycle archived
             assert not (tmp_path / "research" / "iteration_1.md").exists()
             assert not (tmp_path / "research" / "iteration_2.md").exists()
-            
+
             # Verify new cycle restarted (iteration reset to 1)
             with open(tmp_path / "research_runtime.json") as f:
                 state = json.load(f)
@@ -237,12 +424,122 @@ def test_orchestrator_integration():
     print("    PASSED")
 
 
+def test_orchestrator_guaranteed_completion_on_max_iterations():
+    """Test orchestrator archives and resets even with low quality when max iterations reached."""
+    print("  - Running test_orchestrator_guaranteed_completion_on_max_iterations...")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+
+        env = {
+            "AIKEYPOOL_ACTIVE_PROVIDER": "groq",
+            "AIKEYPOOL_PROVIDER_GROQ_KEYS": "gsk_test",
+            "AIKEYPOOL_DATA_DIR": str(tmp_path),
+            "AIKEYPOOL_RESEARCH_MAX_ITERATIONS": "2",
+            "SMTP_HOST": "smtp.test.com",
+            "SMTP_PORT": "587",
+            "SMTP_USER": "u",
+            "SMTP_PASSWORD": "p",
+            "EMAIL_RECIPIENT": "r@t.com",
+        }
+
+        mock_low_quality = {
+            "findings": [],
+            "summary": "Low quality",
+            "iteration_report": {"summary": "Low", "evidence": "None"},
+            "evaluation": {
+                "overall_quality": 30,
+                "coverage": 25,
+                "verification": 20,
+                "source_diversity": 20,
+                "novel_information": 10,
+                "contradictions_resolved": 0,
+                "verified_claims": [],
+                "unverified_claims": [],
+                "open_questions": [],
+                "research_queue": [],
+                "contradictions": [],
+                "completed_topics": [],
+            }
+        }
+
+        with patch.dict("os.environ", env):
+            # Run iterations until max (iteration starts at 1, max=2)
+            # Run 1: iteration 1, skip email, increment to 2
+            with patch("src.maintenance.orchestrator.research_providers", return_value=mock_low_quality):
+                with patch("src.maintenance.orchestrator.generate_research_plan", return_value={"objectives": ["Test"]}):
+                    with patch("src.maintenance.orchestrator.compress_memory", return_value="compressed memory"):
+                        with patch("src.maintenance.orchestrator._do_send_email") as mock_send:
+                            result = run_daily_maintenance()
+                            assert result["steps"]["email"]["status"] == "skipped"
+                            mock_send.assert_not_called()
+
+            # Verify iteration is now 2
+            with open(tmp_path / "research_runtime.json") as f:
+                state = json.load(f)
+            assert state["iteration"] == 2
+
+            # Run 2: iteration 2 (max), should send email even with low quality
+            with patch("src.maintenance.orchestrator.research_providers", return_value=mock_low_quality):
+                with patch("src.maintenance.orchestrator.generate_research_plan", return_value={"objectives": ["Test"]}):
+                    with patch("src.maintenance.orchestrator.generate_final_report", return_value=mock_low_quality):
+                        with patch("src.maintenance.orchestrator._do_send_email", return_value=True) as mock_send:
+                            result = run_daily_maintenance()
+                            assert result["steps"]["email"]["status"] == "sent"
+                            mock_send.assert_called_once()
+
+            # Verify cycle was archived and state reset
+            with open(tmp_path / "research_runtime.json") as f:
+                state = json.load(f)
+            assert state["iteration"] == 1
+            assert state["quality_metrics"]["overall_quality"] == 0
+
+    print("    PASSED")
+
+
+def test_completion_diagnostics_logging():
+    """Test that completion diagnostics are logged properly."""
+    print("  - Running test_completion_diagnostics_logging...")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        config = Config(
+            research_max_iterations=8,
+            research_quality_threshold=90,
+            min_verification_score=80,
+            min_coverage=80,
+        )
+        manager = RuntimeManager(tmp_path, config=config)
+
+        # Set up metrics that don't meet quality threshold
+        manager.state["quality_metrics"] = {
+            "overall_quality": 75,
+            "coverage": 80,
+            "verification": 70,
+            "source_diversity": 60,
+            "novel_information": 50,
+            "contradictions_resolved": 30,
+            "reason": "Partial coverage",
+        }
+        manager.state["verified_claims"] = ["claim1"]
+
+        # This should not raise - just tests the logging path
+        manager.log_completion_decision()
+
+        # Verify it completes without error
+        assert True
+    print("    PASSED")
+
+
 def main():
     print("Running Runtime Manager Tests...")
     test_runtime_manager_state_load_save()
     test_runtime_manager_gating()
+    test_runtime_manager_quality_normalization()
+    test_runtime_manager_claim_tracking()
     test_runtime_manager_archiving()
+    test_guaranteed_completion_on_max_iterations()
     test_orchestrator_integration()
+    test_orchestrator_guaranteed_completion_on_max_iterations()
+    test_completion_diagnostics_logging()
     print("\nAll Runtime Manager Tests Passed!")
 
 

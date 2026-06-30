@@ -257,18 +257,18 @@ def run_daily_maintenance() -> dict:
             logger.info("RESEARCH ITERATION DIAGNOSTICS")
             logger.info("  Current Iteration: %d", iteration)
             logger.info("  Objectives: %s", runtime_state.get("current_plan", {}).get("objectives", []))
-            logger.info("  New Verified Claims Count: %d", len(eval_data.get("verified_claims", [])))
-            logger.info("  Remaining Unverified Claims Count: %d", len(eval_data.get("unverified_claims", [])))
-            logger.info("  New Assumptions: %s", eval_data.get("assumptions", []))
-            logger.info("  Open Questions: %s", eval_data.get("open_questions", []))
-            logger.info("  Contradictions Detected Count: %d", len(eval_data.get("contradictions", [])))
-            logger.info("  Quality Metrics: Overall=%d, Coverage=%d, Verification=%d, Source Diversity=%d",
-                        eval_data.get("overall_quality", 0),
-                        eval_data.get("coverage", 0),
-                        eval_data.get("verification", 0),
-                        eval_data.get("source_diversity", 0))
-            logger.info("  Metric Reason: %s", eval_data.get("reason", ""))
-            logger.info("  Decision: %s", "STOPPING (target quality met or max iterations reached)" if runtime_manager.should_send_email() else "CONTINUING to next iteration")
+            logger.info("  Verified Claims Count: %d", len(runtime_manager.state.get("verified_claims", [])))
+            logger.info("  Unverified Claims Count: %d", len(runtime_manager.state.get("unverified_claims", [])))
+            logger.info("  Open Questions: %s", runtime_manager.state.get("open_questions", []))
+            logger.info("  Research Queue Count: %d", len(runtime_manager.state.get("research_queue", [])))
+            logger.info("  Contradictions Count: %d", len(runtime_manager.state.get("contradictions", [])))
+            metrics = runtime_manager.state.get("quality_metrics", {})
+            logger.info("  Quality Metrics: Overall=%d, Coverage=%d, Verification=%d, SourceDiversity=%d",
+                        metrics.get("overall_quality", 0),
+                        metrics.get("coverage", 0),
+                        metrics.get("verification", 0),
+                        metrics.get("source_diversity", 0))
+            logger.info("  Metric Reason: %s", metrics.get("reason", ""))
             logger.info("=" * 40)
 
         step_results["research"] = {
@@ -331,8 +331,19 @@ def run_daily_maintenance() -> dict:
     email_result = False
     email_duration = 0.0
 
+    # Log completion diagnostics BEFORE making decision
+    runtime_manager.log_completion_decision()
+
     if runtime_manager.should_send_email():
-        logger.info("Email condition met (Quality >= 90 or iteration limit reached). Consolidating final report.")
+        max_iter = runtime_state.get("max_iterations", config.research_max_iterations)
+        iteration = runtime_manager.determine_current_iteration()
+        is_max_reached = iteration >= max_iter
+
+        if is_max_reached:
+            logger.info("Maximum iterations reached (%d/%d). Generating Final Report.", iteration, max_iter)
+        else:
+            logger.info("Quality targets met. Generating Final Report.")
+
         final_report = generate_final_report(config, key_manager, runtime_manager.state)
         research_data = final_report
 
@@ -355,8 +366,11 @@ def run_daily_maintenance() -> dict:
             }
             errors.append("Email delivery failed — see EMAIL FAILED log above for SMTP stage details")
             logger.error("STEP FAIL: Email (%.1fs)", email_duration)
+            # Still archive even if email fails — guaranteed completion
+            logger.info("Archiving cycle despite email failure (guaranteed completion)")
+            runtime_manager.archive_cycle()
     else:
-        logger.info("Email skipped (Quality < 90 and iteration < max). Saving state and incrementing iteration.")
+        logger.info("Email skipped (quality targets not met and iteration < max). Saving state and incrementing iteration.")
         runtime_manager.increment_iteration()
         step_results["email"] = {
             "status": "skipped",

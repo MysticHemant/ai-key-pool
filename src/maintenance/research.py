@@ -435,6 +435,18 @@ Identify pricing changes, free tier changes, new models, API deprecations, and b
 
 Additionally, you MUST evaluate the research quality, check for contradictions against previous assertions, verify claims, update the tracking lists, and write the iteration report.
 
+CLAIM TRACKING RULES:
+- Move claims from unverified_claims to verified_claims ONLY when you have direct evidence
+- Remove resolved items from open_questions and move to resolved_questions
+- Remove completed items from research_queue
+- Do NOT re-research topics already in verified_claims
+- Track contradictions with prev_evidence and current_evidence
+
+CRITICAL — QUALITY SCORE SCALE:
+All evaluation scores MUST be integers between 0 and 100 (inclusive).
+Do NOT use a 1-10 scale. Use 0-100.
+Examples: 0 (worst), 50 (average), 100 (perfect).
+
 Respond with JSON in this exact format:
 {
   "findings": [
@@ -465,13 +477,13 @@ Respond with JSON in this exact format:
     "recommendations_next": "..."
   },
   "evaluation": {
-    "coverage": 0,
-    "verification": 0,
-    "source_diversity": 0,
-    "novel_information": 0,
-    "contradictions_resolved": 0,
-    "overall_quality": 0,
-    "reason": "explanation of scores",
+    "coverage": 85,
+    "verification": 70,
+    "source_diversity": 75,
+    "novel_information": 60,
+    "contradictions_resolved": 50,
+    "overall_quality": 72,
+    "reason": "explanation of scores (scores MUST be 0-100 integers)",
     "verified_claims": [
       {
         "claim": "...",
@@ -847,6 +859,44 @@ def _build_raw_fallback(raw_findings: list[dict]) -> dict:
     }
 
 
+def _normalize_score_0_100(value, key: str) -> int:
+    """Normalize a score to 0-100 integer range.
+
+    If LLM returns 1-10 scale, multiply by 10.
+    Logs normalization when it occurs.
+    """
+    if value is None:
+        return 0
+    try:
+        val = int(value)
+    except (TypeError, ValueError):
+        return 0
+
+    if val < 0:
+        return 0
+    if val > 100:
+        if val <= 10:
+            normalized = val * 10
+            logger.info("QUALITY NORMALIZE (research): %s scaled from %d to %d (1-10 -> 0-100)", key, val, normalized)
+            return normalized
+        return 100
+    return val
+
+
+def _normalize_evaluation_scores(evaluation: dict) -> dict:
+    """Normalize all evaluation scores to 0-100 integer range."""
+    if not isinstance(evaluation, dict):
+        return evaluation
+
+    score_keys = ["coverage", "verification", "source_diversity",
+                   "novel_information", "contradictions_resolved", "overall_quality"]
+    for key in score_keys:
+        if key in evaluation:
+            evaluation[key] = _normalize_score_0_100(evaluation[key], key)
+
+    return evaluation
+
+
 def _normalize_research_result(res: dict) -> dict:
     """Normalize LLM or fallback findings result to contain iteration_report and evaluation."""
     if not isinstance(res, dict):
@@ -885,15 +935,24 @@ def _normalize_research_result(res: dict) -> dict:
         "completed_topics": [],
         "assumptions": []
     })
+
+    # Normalize evaluation scores to 0-100 range
+    if "evaluation" in res:
+        res["evaluation"] = _normalize_evaluation_scores(res["evaluation"])
+
     return res
 
 
 def generate_research_plan(config: Config, key_manager: KeyManager, runtime_state: dict) -> dict:
-    """Generate a structured research plan before research begins using the LLM."""
+    """Generate a structured research plan before research begins using the LLM.
+
+    Uses Runtime State to create targeted objectives based on current gaps.
+    """
     iteration = runtime_state.get("iteration", 1)
 
     plan_prompt = """You are a research planning agent. Generate a structured research plan for iteration {iteration} of AI provider research.
-    Analyze the current state:
+
+    Analyze the current state and generate TARGETED objectives that address specific gaps:
     - Verified Claims: {verified_claims}
     - Unverified Claims: {unverified_claims}
     - Open Questions: {open_questions}
@@ -901,14 +960,26 @@ def generate_research_plan(config: Config, key_manager: KeyManager, runtime_stat
     - Contradictions: {contradictions}
     - Long-Term Memory Summary: {long_term_memory}
 
-    Formulate a plan to search, verify, and resolve gaps.
-    Prevent repetition: do not research already completed topics or verified claims unless new contradictory evidence has been flagged.
+    OBJECTIVE GENERATION RULES:
+    Based on the state above, generate objectives like:
+    - "Verify unresolved claims from previous iteration" (if unverified_claims is non-empty)
+    - "Resolve detected contradictions" (if contradictions is non-empty)
+    - "Validate assumptions with independent sources" (if there are unverified claims)
+    - "Increase source diversity by checking additional provider blogs" (always relevant)
+    - "Investigate missing evidence for [specific claim]" (if claims lack evidence)
+    - "Improve confidence of weak conclusions" (always relevant)
+    - "Answer open questions: [specific question]" (if open_questions is non-empty)
+
+    PREVENT REPETITION:
+    - Do NOT research already completed topics or verified claims
+    - Focus on open_questions and research_queue items
+    - Prioritize contradictions that need resolution
 
     Respond ONLY with a valid JSON object (no markdown fences) containing:
     {{
-      "objectives": ["objective 1", "objective 2"],
-      "claims_to_verify": ["claim to check 1", "claim to check 2"],
-      "questions_to_answer": ["question 1", "question 2"],
+      "objectives": ["targeted objective 1", "targeted objective 2", "targeted objective 3"],
+      "claims_to_verify": ["specific claim from unverified_claims to check"],
+      "questions_to_answer": ["specific open_question to answer"],
       "sources_to_search": ["specific provider blogs or RSS feeds to pay attention to"],
       "expected_deliverables": ["deliverable 1", "deliverable 2"]
     }}
@@ -956,7 +1027,11 @@ def generate_research_plan(config: Config, key_manager: KeyManager, runtime_stat
 
 def _default_plan() -> dict:
     return {
-        "objectives": ["Identify recent AI model releases and provider updates."],
+        "objectives": [
+            "Verify unresolved claims from previous iteration",
+            "Increase source diversity by checking additional provider blogs",
+            "Improve confidence of weak conclusions",
+        ],
         "claims_to_verify": [],
         "questions_to_answer": ["What are the latest models released in the last 30 days?"],
         "sources_to_search": ["All available public RSS feeds and blogs."],
@@ -1030,7 +1105,11 @@ def compress_memory(config: Config, key_manager: KeyManager, runtime_state: dict
 
 
 def generate_final_report(config: Config, key_manager: KeyManager, runtime_state: dict) -> dict:
-    """Consolidate all iteration reports and memory into a single, polished final report using the LLM."""
+    """Consolidate all iteration reports and memory into a single, polished final report using the LLM.
+
+    Loads every iteration, merges findings, removes duplicates, resolves contradictions,
+    ranks by confidence, generates executive summary, detailed report, and action items.
+    """
     iteration = runtime_state.get("iteration", 1)
     research_dir = config.data_dir / "research"
 
@@ -1047,22 +1126,38 @@ def generate_final_report(config: Config, key_manager: KeyManager, runtime_state
     combined_context = "\n\n".join(iters_content)
     ltm = runtime_state.get("long_term_memory", "")
 
+    # Load claim tracking state
+    verified_claims = runtime_state.get("verified_claims", [])
+    unverified_claims = runtime_state.get("unverified_claims", [])
+    contradictions = runtime_state.get("contradictions", [])
+
     # Prompt the LLM to consolidate
     merge_prompt = """You are a senior AI research analyst. You are given a series of research iterations and a long-term memory summary about AI provider updates, model releases, and pricing changes.
 
     Your task is to:
-    1. Merge all findings from all iterations.
-    2. Remove duplicate findings.
+    1. Merge all findings from ALL iterations into a single comprehensive view.
+    2. Remove duplicate findings across iterations.
     3. Resolve any contradictions between different iterations (favoring more recent, verified findings).
-    4. Rank findings by confidence level.
+    4. Rank findings by confidence level (high > medium > low).
     5. Generate a single highly polished, comprehensive final report containing:
-       - Executive Summary
-       - Key Provider Updates & Model Releases (ranked by confidence)
-       - Pricing & Free-Tier Changes
-       - Verified Claims vs. Unresolved Gaps / Future Questions
+
+    SECTIONS REQUIRED:
+    - Executive Summary (2-3 paragraph overview of all research)
+    - Key Provider Updates & Model Releases (ranked by confidence)
+    - Pricing & Free-Tier Changes
+    - Breaking Changes & Deprecations
+    - Verified Claims (list all verified_claims with evidence)
+    - Unresolved Gaps & Future Questions (from unverified_claims and open_questions)
+    - Contradictions Detected (list contradictions with resolution status)
+    - Action Items (prioritized list of recommended next steps)
+
+    Verified Claims from state: {verified_claims}
+    Unverified Claims from state: {unverified_claims}
+    Contradictions from state: {contradictions}
 
     Respond ONLY with a valid JSON object (no markdown fences) containing:
     {{
+      "summary": "Executive Summary + Detailed Report in Markdown format",
       "findings": [
         {{
           "provider": "...",
@@ -1074,12 +1169,12 @@ def generate_final_report(config: Config, key_manager: KeyManager, runtime_state
           "confidence": "..."
         }}
       ],
-      "summary": "Polished comprehensive final research report in Markdown.",
       "new_providers": ["..."],
       "new_models": ["..."],
       "pricing_changes": ["..."],
       "free_tier_changes": ["..."],
-      "breaking_changes": ["..."]
+      "breaking_changes": ["..."],
+      "action_items": ["prioritized action 1", "prioritized action 2"]
     }}
     """
 

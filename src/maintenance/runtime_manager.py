@@ -9,6 +9,12 @@ from ..utils.logger import get_logger
 
 logger = get_logger("runtime_manager")
 
+# Quality metric keys that must be valid integers in 0-100 range
+QUALITY_METRIC_KEYS = [
+    "coverage", "verification", "source_diversity",
+    "novel_information", "contradictions_resolved", "overall_quality",
+]
+
 
 class RuntimeManager:
     """Manages the persistent state and execution decisions for the research workflow."""
@@ -16,13 +22,13 @@ class RuntimeManager:
     def __init__(self, data_dir: Path, config=None):
         self.data_dir = Path(data_dir)
         self.state_file = self.data_dir / "research_runtime.json"
-        
+
         if config is None:
             from ..utils.config import load_config
             self.config = load_config()
         else:
             self.config = config
-            
+
         self.max_iterations = self.config.research_max_iterations
         self.state = {}
         self.load_state()
@@ -56,7 +62,7 @@ class RuntimeManager:
             "assumptions": [],
             "history": [],
             "final_report_ready": False,
-            
+
             # Upgraded state keys for the self-improving agent
             "verified_claims": [],
             "unverified_claims": [],
@@ -66,7 +72,7 @@ class RuntimeManager:
             "contradictions": [],
             "long_term_memory": "",
             "current_plan": {},
-            
+
             # Structured quality metrics
             "quality_metrics": {
                 "coverage": 0,
@@ -93,55 +99,292 @@ class RuntimeManager:
         """Get the current iteration index."""
         return self.state.get("iteration", 1)
 
+    def _normalize_score_to_100(self, value, key: str) -> int:
+        """Normalize a quality score to 0-100 range.
+
+        Clamps to 0-100. For 1-10 scale detection, use _validate_quality_metrics.
+        """
+        if value is None:
+            logger.warning("QUALITY NORMALIZE: %s is None, defaulting to 0", key)
+            return 0
+
+        try:
+            val = int(value)
+        except (TypeError, ValueError):
+            logger.warning("QUALITY NORMALIZE: %s has non-numeric value %r, defaulting to 0", key, value)
+            return 0
+
+        if val < 0:
+            logger.warning("QUALITY NORMALIZE: %s is %d (< 0), clamping to 0", key, val)
+            return 0
+
+        if val > 100:
+            logger.warning("QUALITY NORMALIZE: %s is %d (> 100), clamping to 100", key, val)
+            return 100
+
+        return val
+
+    def _validate_quality_metrics(self, metrics: dict) -> dict:
+        """Validate and normalize quality metrics to 0-100 integer range.
+
+        Detects if LLM returned 1-10 scale by checking if ALL numeric scores are <= 10.
+        If so, normalizes all scores by multiplying by 10.
+
+        Returns validated metrics dict. Never allows invalid values into RuntimeManager state.
+        """
+        if not isinstance(metrics, dict):
+            logger.warning("QUALITY VALIDATE: metrics is not a dict (%s), using defaults", type(metrics).__name__)
+            return self._default_quality_metrics("metrics was not a dict")
+
+        # First pass: extract and validate raw numeric values
+        raw_values = {}
+        all_numeric = True
+        for key in QUALITY_METRIC_KEYS:
+            raw_value = metrics.get(key)
+            if raw_value is None:
+                raw_values[key] = 0
+                all_numeric = False
+                continue
+            try:
+                raw_values[key] = int(raw_value)
+            except (TypeError, ValueError):
+                raw_values[key] = 0
+                all_numeric = False
+
+        # Detect 1-10 scale: if all non-zero values are <= 10, assume 1-10 scale
+        non_zero_values = [v for v in raw_values.values() if v > 0]
+        is_1_10_scale = non_zero_values and all(v <= 10 for v in non_zero_values)
+
+        # Second pass: normalize
+        validated = {}
+        for key in QUALITY_METRIC_KEYS:
+            val = raw_values[key]
+            original = val
+
+            if is_1_10_scale and val > 0:
+                val = val * 10
+                logger.info("QUALITY NORMALIZE: %s scaled from %d to %d (1-10 -> 0-100)", key, original, val)
+
+            # Clamp to 0-100
+            val = max(0, min(100, val))
+            validated[key] = val
+
+        # Ensure reason is present
+        validated["reason"] = metrics.get("reason", "")
+
+        if is_1_10_scale:
+            logger.info(
+                "QUALITY VALIDATE: Detected 1-10 scale, normalized all scores to 0-100. "
+                "Coverage=%d, Verification=%d, SourceDiversity=%d, OverallQuality=%d",
+                validated["coverage"], validated["verification"],
+                validated["source_diversity"], validated["overall_quality"],
+            )
+
+        return validated
+
+    def _default_quality_metrics(self, reason: str) -> dict:
+        """Return safe default quality metrics."""
+        return {
+            "coverage": 0,
+            "verification": 0,
+            "source_diversity": 0,
+            "novel_information": 0,
+            "contradictions_resolved": 0,
+            "overall_quality": 0,
+            "reason": reason,
+        }
+
     def should_send_email(self) -> bool:
-        """Decide if workflow requirements are met to send the final email."""
+        """Decide if workflow requirements are met to send the final email.
+
+        Completion requires ONE of:
+        A) Quality-based: overall_quality >= threshold AND coverage >= threshold AND verification >= threshold
+           AND minimum number of verified claims (>= 3)
+        B) Iteration-based: iteration >= max_iterations (guaranteed completion)
+
+        This prevents premature completion while guaranteeing eventual completion.
+        """
         metrics = self.state.get("quality_metrics", {})
         overall_quality = metrics.get("overall_quality", self.state.get("quality_score", 0))
+        coverage = metrics.get("coverage", 0)
         verification = metrics.get("verification", 0)
-        source_diversity = metrics.get("source_diversity", 0)
 
         iteration = self.state.get("iteration", 1)
         max_iter = self.state.get("max_iterations", self.max_iterations)
 
         quality_target = self.config.research_quality_threshold
         min_ver = self.config.min_verification_score
-        min_div = self.config.min_source_diversity
+        min_cov = getattr(self.config, 'min_coverage', 80)
+        verified_count = len(self.state.get("verified_claims", []))
+        min_verified_claims = 3
 
+        # Path A: Quality-based completion
         quality_met = (
-            overall_quality >= quality_target and
-            verification >= min_ver and
-            source_diversity >= min_div
+            overall_quality >= quality_target
+            and coverage >= min_cov
+            and verification >= min_ver
+            and verified_count >= min_verified_claims
         )
 
-        return quality_met or iteration >= max_iter
+        # Path B: Guaranteed completion (max iterations reached)
+        max_reached = iteration >= max_iter
+
+        return quality_met or max_reached
+
+    def log_completion_decision(self) -> None:
+        """Log detailed email/completion decision diagnostics."""
+        metrics = self.state.get("quality_metrics", {})
+        overall_quality = metrics.get("overall_quality", 0)
+        coverage = metrics.get("coverage", 0)
+        verification = metrics.get("verification", 0)
+
+        iteration = self.state.get("iteration", 1)
+        max_iter = self.state.get("max_iterations", self.max_iterations)
+        verified_count = len(self.state.get("verified_claims", []))
+
+        quality_target = self.config.research_quality_threshold
+        min_ver = self.config.min_verification_score
+        min_cov = getattr(self.config, 'min_coverage', 80)
+        min_verified_claims = 3
+
+        quality_met = (
+            overall_quality >= quality_target
+            and coverage >= min_cov
+            and verification >= min_ver
+            and verified_count >= min_verified_claims
+        )
+        max_reached = iteration >= max_iter
+        should_send = self.should_send_email()
+
+        logger.info("=" * 50)
+        logger.info("COMPLETION DIAGNOSTICS")
+        logger.info("  Iteration: %d/%d", iteration, max_iter)
+        logger.info("  Overall Quality: %d (threshold: %d)", overall_quality, quality_target)
+        logger.info("  Coverage: %d (threshold: %d)", coverage, min_cov)
+        logger.info("  Verification: %d (threshold: %d)", verification, min_ver)
+        logger.info("  Verified Claims: %d (minimum: %d)", verified_count, min_verified_claims)
+        logger.info("  Decision: %s", "SEND EMAIL" if should_send else "CONTINUE RESEARCH")
+        if should_send:
+            if quality_met:
+                logger.info("  Reason: Quality targets met (quality=%d, coverage=%d, verification=%d, verified=%d)",
+                            overall_quality, coverage, verification, verified_count)
+            elif max_reached:
+                logger.info("  Reason: Maximum iterations reached (%d/%d)", iteration, max_iter)
+            else:
+                logger.info("  Reason: Completion conditions met")
+        else:
+            reasons = []
+            if not quality_met:
+                missing = []
+                if overall_quality < quality_target:
+                    missing.append("quality %d < %d" % (overall_quality, quality_target))
+                if coverage < min_cov:
+                    missing.append("coverage %d < %d" % (coverage, min_cov))
+                if verification < min_ver:
+                    missing.append("verification %d < %d" % (verification, min_ver))
+                if verified_count < min_verified_claims:
+                    missing.append("verified claims %d < %d" % (verified_count, min_verified_claims))
+                reasons.append("Quality targets not met: " + ", ".join(missing))
+            if not max_reached:
+                reasons.append("Iteration %d < max %d" % (iteration, max_iter))
+            logger.info("  Reason: %s", "; ".join(reasons))
+        logger.info("=" * 50)
+
+    def _update_claim_tracking(self, evaluation: dict) -> None:
+        """Update claim tracking lists from evaluation.
+
+        - Remove items completed this iteration from open lists
+        - Promote resolved items to completed lists
+        - Avoid re-researching verified claims
+        """
+        # Get current state lists
+        prev_verified = set(self.state.get("verified_claims", []))
+        prev_resolved = set(self.state.get("resolved_questions", []))
+        prev_completed = set(self.state.get("completed_topics", []))
+
+        # Get new evaluation lists
+        new_verified = evaluation.get("verified_claims", [])
+        new_unverified = evaluation.get("unverified_claims", [])
+        new_resolved = evaluation.get("resolved_questions", [])
+        new_open = evaluation.get("open_questions", [])
+        new_completed = evaluation.get("completed_topics", [])
+        new_queue = evaluation.get("research_queue", [])
+        new_contradictions = evaluation.get("contradictions", [])
+
+        # Merge verified claims (keep as strings or dicts)
+        all_verified = set(prev_verified)
+        for claim in new_verified:
+            if isinstance(claim, dict):
+                all_verified.add(claim.get("claim", str(claim)))
+            else:
+                all_verified.add(str(claim))
+
+        # Merge resolved questions
+        all_resolved = set(prev_resolved)
+        for q in new_resolved:
+            all_resolved.add(str(q))
+
+        # Merge completed topics
+        all_completed = set(prev_completed)
+        for t in new_completed:
+            all_completed.add(str(t))
+
+        # Remove from open lists items that are now verified/resolved/completed
+        verified_strings = {str(v) if isinstance(v, str) else v.get("claim", str(v)) for v in all_verified}
+        resolved_strings = all_resolved
+        completed_strings = all_completed
+
+        # Filter unverified claims: remove those now verified
+        filtered_unverified = []
+        for claim in new_unverified:
+            claim_text = claim.get("claim", str(claim)) if isinstance(claim, dict) else str(claim)
+            if claim_text not in verified_strings:
+                filtered_unverified.append(claim)
+
+        # Filter open questions: remove those now resolved
+        filtered_open = [q for q in new_open if str(q) not in resolved_strings]
+
+        # Filter research queue: remove completed items
+        filtered_queue = [q for q in new_queue if str(q) not in completed_strings and str(q) not in verified_strings]
+
+        # Update state
+        self.state["verified_claims"] = sorted(all_verified)
+        self.state["unverified_claims"] = filtered_unverified
+        self.state["resolved_questions"] = sorted(all_resolved)
+        self.state["open_questions"] = filtered_open
+        self.state["completed_topics"] = sorted(all_completed)
+        self.state["research_queue"] = filtered_queue
+        self.state["contradictions"] = new_contradictions if isinstance(new_contradictions, list) else []
+
+        logger.info(
+            "CLAIM TRACKING: verified=%d, unverified=%d, resolved=%d, open=%d, queue=%d, contradictions=%d",
+            len(self.state["verified_claims"]),
+            len(self.state["unverified_claims"]),
+            len(self.state["resolved_questions"]),
+            len(self.state["open_questions"]),
+            len(self.state["research_queue"]),
+            len(self.state["contradictions"]),
+        )
 
     def update_state(self, evaluation: dict, findings: list) -> None:
         """Update scores and tracking details from the latest iteration's evaluation."""
-        self.state["quality_score"] = evaluation.get("overall_quality", evaluation.get("quality_score", 0))
-        self.state["coverage_score"] = evaluation.get("coverage", evaluation.get("coverage_score", 0))
-        self.state["confidence_score"] = evaluation.get("source_diversity", evaluation.get("confidence_score", 0))
+        # Validate and normalize quality metrics
+        raw_metrics = evaluation.get("evaluation", evaluation)
+        if "evaluation" in evaluation:
+            raw_metrics = evaluation["evaluation"]
 
-        # Store structured quality metrics
-        self.state["quality_metrics"] = {
-            "coverage": evaluation.get("coverage", 0),
-            "verification": evaluation.get("verification", 0),
-            "source_diversity": evaluation.get("source_diversity", 0),
-            "novel_information": evaluation.get("novel_information", 0),
-            "contradictions_resolved": evaluation.get("contradictions_resolved", 0),
-            "overall_quality": evaluation.get("overall_quality", 0),
-            "reason": evaluation.get("reason", "")
-        }
+        validated_metrics = self._validate_quality_metrics(raw_metrics)
+        self.state["quality_metrics"] = validated_metrics
 
-        # Update tracking lists from evaluation outputs
-        self.state["verified_claims"] = evaluation.get("verified_claims", self.state.get("verified_claims", []))
-        self.state["unverified_claims"] = evaluation.get("unverified_claims", self.state.get("unverified_claims", []))
-        self.state["resolved_questions"] = evaluation.get("resolved_questions", self.state.get("resolved_questions", []))
-        self.state["open_questions"] = evaluation.get("open_questions", self.state.get("open_questions", []))
-        self.state["research_queue"] = evaluation.get("research_queue", self.state.get("research_queue", []))
-        self.state["contradictions"] = evaluation.get("contradictions", self.state.get("contradictions", []))
+        # Update legacy scalar scores
+        self.state["quality_score"] = validated_metrics["overall_quality"]
+        self.state["coverage_score"] = validated_metrics["coverage"]
+        self.state["confidence_score"] = validated_metrics["source_diversity"]
+
+        # Update claim tracking with proper promotion/removal
+        self._update_claim_tracking(evaluation)
 
         # Compatibility keys
-        self.state["completed_topics"] = evaluation.get("completed_topics", self.state.get("completed_topics", []))
         self.state["research_questions"] = self.state["open_questions"]
         self.state["assumptions"] = evaluation.get("assumptions", self.state.get("assumptions", []))
 
@@ -153,6 +396,7 @@ class RuntimeManager:
             "timestamp": datetime.now(timezone.utc).isoformat()
         })
 
+        # Check completion
         if self.should_send_email():
             self.state["status"] = "completed"
             self.state["final_report_ready"] = True
