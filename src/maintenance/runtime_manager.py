@@ -241,6 +241,7 @@ class RuntimeManager:
         iteration = self.state.get("iteration", 1)
         max_iter = self.state.get("max_iterations", self.max_iterations)
         verified_count = len(self.state.get("verified_claims", []))
+        open_count = len(self.state.get("open_questions", []))
 
         quality_target = self.config.research_quality_threshold
         min_ver = self.config.min_verification_score
@@ -257,37 +258,41 @@ class RuntimeManager:
         should_send = self.should_send_email()
 
         logger.info("=" * 50)
-        logger.info("COMPLETION DIAGNOSTICS")
-        logger.info("  Iteration: %d/%d", iteration, max_iter)
-        logger.info("  Overall Quality: %d (threshold: %d)", overall_quality, quality_target)
-        logger.info("  Coverage: %d (threshold: %d)", coverage, min_cov)
-        logger.info("  Verification: %d (threshold: %d)", verification, min_ver)
-        logger.info("  Verified Claims: %d (minimum: %d)", verified_count, min_verified_claims)
-        logger.info("  Decision: %s", "SEND EMAIL" if should_send else "CONTINUE RESEARCH")
+        logger.info("FINAL RUNTIME DIAGNOSTICS")
+        logger.info("")
+        logger.info("Iteration: %d / %d", iteration, max_iter)
+        logger.info("Overall Quality: %d", overall_quality)
+        logger.info("Coverage: %d", coverage)
+        logger.info("Verification: %d", verification)
+        logger.info("Verified Claims: %d", verified_count)
+        logger.info("Open Questions: %d", open_count)
+        logger.info("")
         if should_send:
+            logger.info("Decision: Send Final Report")
+            logger.info("")
+            logger.info("Reason:")
             if quality_met:
-                logger.info("  Reason: Quality targets met (quality=%d, coverage=%d, verification=%d, verified=%d)",
-                            overall_quality, coverage, verification, verified_count)
-            elif max_reached:
-                logger.info("  Reason: Maximum iterations reached (%d/%d)", iteration, max_iter)
-            else:
-                logger.info("  Reason: Completion conditions met")
+                logger.info("  Quality threshold reached.")
+            if max_reached:
+                logger.info("  Maximum iterations reached.")
         else:
-            reasons = []
-            if not quality_met:
-                missing = []
-                if overall_quality < quality_target:
-                    missing.append("quality %d < %d" % (overall_quality, quality_target))
-                if coverage < min_cov:
-                    missing.append("coverage %d < %d" % (coverage, min_cov))
-                if verification < min_ver:
-                    missing.append("verification %d < %d" % (verification, min_ver))
-                if verified_count < min_verified_claims:
-                    missing.append("verified claims %d < %d" % (verified_count, min_verified_claims))
-                reasons.append("Quality targets not met: " + ", ".join(missing))
+            logger.info("Decision: Continue Research")
+            logger.info("")
+            logger.info("Reason:")
+            missing = []
+            if overall_quality < quality_target:
+                missing.append("Overall quality below threshold (%d)." % quality_target)
+            if coverage < min_cov:
+                missing.append("Coverage below threshold (%d)." % min_cov)
+            if verification < min_ver:
+                missing.append("Verification below threshold (%d)." % min_ver)
+            if verified_count < min_verified_claims:
+                missing.append("Verified claims below minimum (%d)." % min_verified_claims)
             if not max_reached:
-                reasons.append("Iteration %d < max %d" % (iteration, max_iter))
-            logger.info("  Reason: %s", "; ".join(reasons))
+                missing.append("Iteration %d < max %d." % (iteration, max_iter))
+            for reason in missing:
+                logger.info("  %s", reason)
+        logger.info("")
         logger.info("=" * 50)
 
     @staticmethod

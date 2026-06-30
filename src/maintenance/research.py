@@ -1188,7 +1188,11 @@ def generate_final_report(config: Config, key_manager: KeyManager, runtime_state
 
     messages = [
         ChatMessage(role="system", content="You are a report consolidation assistant. Respond only with valid JSON."),
-        ChatMessage(role="user", content=merge_prompt.format() + f"\n\nLong-Term Memory:\n{ltm}\n\nIterations:\n{combined_context}"),
+        ChatMessage(role="user", content=merge_prompt.format(
+            verified_claims=verified_claims,
+            unverified_claims=unverified_claims,
+            contradictions=contradictions,
+        ) + f"\n\nLong-Term Memory:\n{ltm}\n\nIterations:\n{combined_context}"),
     ]
     model = provider.get_default_model()
 
