@@ -286,12 +286,12 @@ def _build_html_body(
 ) -> str:
     """Build comprehensive HTML email body.
 
-    Includes: system status, provider summary, research summary,
-    recommendations, warnings, maintenance duration, workflow status.
+    Supports both new structured format (with 'sections') and legacy format.
+    NEVER dumps raw markdown — always renders structured data as HTML.
 
     Args:
         status: System status dict
-        recommendations: Research data dict
+        recommendations: Research data dict (may include 'sections')
         errors: Error messages
         maintenance_duration: Duration in seconds
         workflow_status: Workflow status string
@@ -315,6 +315,8 @@ def _build_html_body(
     pricing_changes = recommendations.get("pricing_changes", [])
     free_tier_changes = recommendations.get("free_tier_changes", [])
     breaking_changes = recommendations.get("breaking_changes", [])
+    action_items = recommendations.get("action_items", [])
+    sections = recommendations.get("sections", {})
 
     duration_str = f"{maintenance_duration:.1f}s" if maintenance_duration else "N/A"
     status_class = "ok" if workflow_status in ("completed",) else "warn" if "error" in workflow_status else "error"
@@ -337,6 +339,11 @@ th {{ background: #f5f5f5; font-weight: 600; }}
 .tag-high {{ background: #ffebee; color: #c62828; }}
 .tag-medium {{ background: #fff3e0; color: #e65100; }}
 .tag-low {{ background: #e8f5e9; color: #2e7d32; }}
+.section-box {{ background: #f9f9f9; border-left: 4px solid #4CAF50; padding: 12px 16px; margin: 12px 0; }}
+.stat-grid {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 12px 0; }}
+.stat-item {{ background: #f5f5f5; padding: 8px 12px; border-radius: 4px; text-align: center; }}
+.stat-value {{ font-size: 24px; font-weight: 700; color: #333; }}
+.stat-label {{ font-size: 11px; color: #666; text-transform: uppercase; }}
 a {{ color: #1976D2; }}
 </style></head>
 <body>
@@ -357,6 +364,24 @@ a {{ color: #1976D2; }}
 </table>
 """
 
+    # ── Research Statistics (new structured format) ──
+    stats = sections.get("statistics", {})
+    if stats:
+        html += """<h3>Research Statistics</h3>
+<div class="stat-grid">
+"""
+        stat_items = [
+            ("Iterations", stats.get("iterations", 0)),
+            ("Findings", stats.get("total_findings", 0)),
+            ("High Confidence", stats.get("high_confidence_findings", 0)),
+            ("Verified Claims", stats.get("verified_claims", 0)),
+            ("Open Questions", stats.get("open_questions", 0)),
+            ("Quality Score", f"{stats.get('overall_quality', 0)}%"),
+        ]
+        for label, value in stat_items:
+            html += f'  <div class="stat-item"><div class="stat-value">{html_mod.escape(str(value))}</div><div class="stat-label">{html_mod.escape(label)}</div></div>\n'
+        html += "</div>\n"
+
     # Provider summaries
     if provider_summaries:
         html += "<h3>Provider Summary</h3>\n<table>\n"
@@ -367,9 +392,28 @@ a {{ color: #1976D2; }}
             html += f"  <tr><td>{html_mod.escape(pname)}</td><td>{ptotal}</td><td>{phealthy}</td></tr>\n"
         html += "</table>\n"
 
-    # Research summary
-    html += f"<h3>Research Summary</h3>\n<p>{html_mod.escape(summary)}</p>\n"
+    # ── Executive Summary (never raw markdown) ──
+    exec_summary = sections.get("executive_summary", summary)
+    if exec_summary:
+        # Strip any markdown formatting from summary
+        clean_summary = exec_summary.replace("#", "").replace("**", "").replace("*", "").strip()
+        html += f'<h3>Executive Summary</h3>\n<div class="section-box"><p>{html_mod.escape(clean_summary)}</p></div>\n'
 
+    # ── Important Changes (structured format) ──
+    important = sections.get("important_changes", [])
+    if important:
+        html += "<h3>Important Changes</h3>\n<table>\n"
+        html += "<tr><th>Provider</th><th>Description</th><th>Type</th><th>Confidence</th></tr>\n"
+        for item in important[:15]:
+            iprovider = html_mod.escape(str(item.get("provider", "")))
+            idesc = html_mod.escape(str(item.get("description", ""))[:120])
+            itype = html_mod.escape(str(item.get("type", "")))
+            iconf = html_mod.escape(str(item.get("confidence", "")))
+            confidence_class = "tag-high" if iconf == "high" else "tag-medium" if iconf == "medium" else "tag-low"
+            html += f'  <tr><td>{iprovider}</td><td>{idesc}</td><td>{itype}</td><td><span class="tag {confidence_class}">{iconf}</span></td></tr>\n'
+        html += "</table>\n"
+
+    # ── Legacy lists (backward compat) ──
     if new_providers:
         html += "<h3>New Providers</h3><ul>\n"
         for p in new_providers:
@@ -400,7 +444,7 @@ a {{ color: #1976D2; }}
             html += f'  <li class="error">{html_mod.escape(str(c))}</li>\n'
         html += "</ul>\n"
 
-    # Detailed findings
+    # ── Detailed findings ──
     if findings:
         html += "<h3>Detailed Findings</h3>\n<table>\n"
         html += "<tr><th>Provider</th><th>Description</th><th>Type</th><th>Action</th><th>Confidence</th></tr>\n"
@@ -417,15 +461,36 @@ a {{ color: #1976D2; }}
             html += f"  <tr><td>{fprovider}</td><td>{fdesc}</td><td>{ftype}</td><td>{faction}</td><td><span class=\"tag {confidence_class}\">{fconfidence}</span></td></tr>\n"
         html += "</table>\n"
 
-    # Recommendations
-    recs = recommendations.get("recommendations", [])
-    if recs:
+    # ── Action Items (new structured format) ──
+    if action_items:
         html += "<h3>Recommended Actions</h3><ul>\n"
-        for r in recs:
-            priority = r.get("priority", "medium")
-            action = html_mod.escape(str(r.get("action", "")))
-            reason = html_mod.escape(str(r.get("reason", "")))
-            html += f'  <li><span class="tag tag-{priority}">{priority}</span> {action} — {reason}</li>\n'
+        for item in action_items:
+            html += f"  <li>{html_mod.escape(str(item))}</li>\n"
+        html += "</ul>\n"
+
+    # ── Verified Findings (from sections) ──
+    verified = sections.get("verified_findings", [])
+    if verified:
+        html += "<h3>Verified Findings</h3><ul>\n"
+        for v in verified[:10]:
+            vclaim = html_mod.escape(str(v.get("claim", "")))
+            vsource = html_mod.escape(str(v.get("source", ""))[:80])
+            vconf = html_mod.escape(str(v.get("confidence", "")))
+            html += f'  <li><strong>{vclaim}</strong> — <span class="tag tag-{vconf}">{vconf}</span>'
+            if vsource:
+                html += f' <span style="color:#999">({vsource})</span>'
+            html += '</li>\n'
+        html += "</ul>\n"
+
+    # ── Open Questions (from sections) ──
+    open_q = sections.get("open_questions", [])
+    if open_q:
+        html += "<h3>Open Questions</h3><ul>\n"
+        for q in open_q[:10]:
+            if isinstance(q, dict):
+                html += f"  <li>{html_mod.escape(str(q.get('claim', q.get('question', str(q)))))}</li>\n"
+            else:
+                html += f"  <li>{html_mod.escape(str(q))}</li>\n"
         html += "</ul>\n"
 
     # Links to official announcements

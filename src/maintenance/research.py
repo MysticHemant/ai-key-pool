@@ -1130,95 +1130,356 @@ def compress_memory(config: Config, key_manager: KeyManager, runtime_state: dict
 
 
 def generate_final_report(config: Config, key_manager: KeyManager, runtime_state: dict) -> dict:
-    """Consolidate all iteration reports and memory into a single, polished final report using the LLM.
+    """Consolidate all iteration findings into a polished final report.
 
-    Loads every iteration, merges findings, removes duplicates, resolves contradictions,
-    ranks by confidence, generates executive summary, detailed report, and action items.
+    Uses structured findings (JSON) instead of raw markdown concatenation.
+    LLM only writes the narrative — data compilation is done deterministically.
+    Falls back to deterministic report generation if LLM fails.
+
+    Args:
+        config: System configuration
+        key_manager: Key manager instance
+        runtime_state: RuntimeManager state dict
+
+    Returns:
+        Report dict with 'summary', 'findings', 'action_items', 'sections'
     """
     iteration = runtime_state.get("iteration", 1)
     research_dir = config.data_dir / "research"
 
-    # Load all iterations
-    iters_content = []
+    # Step 1: Load all structured findings from JSON files
+    all_findings = []
     for i in range(1, iteration + 1):
-        p = research_dir / f"iteration_{i}.md"
-        if p.exists():
+        findings_file = research_dir / f"iteration_{i}_findings.json"
+        if findings_file.exists():
             try:
-                iters_content.append(f"=== ITERATION {i} ===\n{p.read_text(encoding='utf-8')}")
+                with open(findings_file) as f:
+                    data = json.load(f)
+                all_findings.extend(data.get("findings", []))
             except Exception as e:
-                logger.error("Could not read iteration %d file: %s", i, e)
+                logger.warning("Could not load findings for iteration %d: %s", i, e)
 
-    combined_context = "\n\n".join(iters_content)
-    ltm = runtime_state.get("long_term_memory", "")
+    # Step 2: Merge and deduplicate findings deterministically
+    merged_findings = _merge_structured_findings(all_findings)
 
-    # Load claim tracking state
+    # Step 3: Load state for report sections
     verified_claims = runtime_state.get("verified_claims", [])
     unverified_claims = runtime_state.get("unverified_claims", [])
+    open_questions = runtime_state.get("open_questions", [])
+    resolved_questions = runtime_state.get("resolved_questions", [])
     contradictions = runtime_state.get("contradictions", [])
+    quality_metrics = runtime_state.get("quality_metrics", {})
+    history = runtime_state.get("history", [])
 
-    # Prompt the LLM to consolidate
-    merge_prompt = """You are a senior AI research analyst. You are given a series of research iterations and a long-term memory summary about AI provider updates, model releases, and pricing changes.
+    # Step 4: Build deterministic report sections
+    sections = _build_report_sections(
+        merged_findings=merged_findings,
+        verified_claims=verified_claims,
+        unverified_claims=unverified_claims,
+        open_questions=open_questions,
+        resolved_questions=resolved_questions,
+        contradictions=contradictions,
+        quality_metrics=quality_metrics,
+        history=history,
+        iteration=iteration,
+    )
 
-    Your task is to:
-    1. Merge all findings from ALL iterations into a single comprehensive view.
-    2. Remove duplicate findings across iterations.
-    3. Resolve any contradictions between different iterations (favoring more recent, verified findings).
-    4. Rank findings by confidence level (high > medium > low).
-    5. Generate a single highly polished, comprehensive final report containing:
+    # Step 5: Try LLM narrative generation (optional enhancement)
+    llm_summary = None
+    try:
+        llm_summary = _llm_generate_narrative(sections, config, key_manager, runtime_state)
+    except Exception as e:
+        logger.warning("LLM narrative generation failed: %s — using deterministic summary", e)
 
-    SECTIONS REQUIRED:
-    - Executive Summary (2-3 paragraph overview of all research)
-    - Key Provider Updates & Model Releases (ranked by confidence)
-    - Pricing & Free-Tier Changes
-    - Breaking Changes & Deprecations
-    - Verified Claims (list all verified_claims with evidence)
-    - Unresolved Gaps & Future Questions (from unverified_claims and open_questions)
-    - Contradictions Detected (list contradictions with resolution status)
-    - Action Items (prioritized list of recommended next steps)
+    # Step 6: Build final report (deterministic + optional LLM narrative)
+    summary = llm_summary if llm_summary else sections["executive_summary"]
 
-    Verified Claims from state: {verified_claims}
-    Unverified Claims from state: {unverified_claims}
-    Contradictions from state: {contradictions}
+    # Extract action items from findings
+    action_items = []
+    for f in merged_findings:
+        action = f.get("importance", f.get("action", "none"))
+        if action in ("add_provider", "update"):
+            provider = f.get("provider", "Unknown")
+            claim = f.get("claim", f.get("description", ""))
+            action_items.append(f"{action.replace('_', ' ').title()}: {provider} — {claim[:100]}")
+        elif f.get("category") in ("deprecation", "breaking"):
+            action_items.append(f"URGENT: {f.get('claim', f.get('description', ''))[:100]}")
 
-    Respond ONLY with a valid JSON object (no markdown fences) containing:
-    {{
-      "summary": "Executive Summary + Detailed Report in Markdown format",
-      "findings": [
-        {{
-          "provider": "...",
-          "model": "...",
-          "description": "...",
-          "url": "...",
-          "type": "...",
-          "action": "...",
-          "confidence": "..."
-        }}
-      ],
-      "new_providers": ["..."],
-      "new_models": ["..."],
-      "pricing_changes": ["..."],
-      "free_tier_changes": ["..."],
-      "breaking_changes": ["..."],
-      "action_items": ["prioritized action 1", "prioritized action 2"]
-    }}
+    # Extract category-specific lists
+    new_providers = [
+        f.get("provider", "") for f in merged_findings
+        if f.get("importance") == "add_provider" and f.get("provider")
+    ]
+    new_models = [
+        f.get("claim", "") for f in merged_findings
+        if f.get("category") == "model" and f.get("claim")
+    ]
+    pricing_changes = [
+        f.get("claim", "") for f in merged_findings
+        if f.get("category") == "pricing" and f.get("claim")
+    ]
+    free_tier_changes = [
+        f.get("claim", "") for f in merged_findings
+        if f.get("category") == "free_tier" and f.get("claim")
+    ]
+    breaking_changes = [
+        f.get("claim", "") for f in merged_findings
+        if f.get("category") in ("deprecation", "breaking") and f.get("claim")
+    ]
+
+    return {
+        "summary": summary,
+        "findings": [
+            {
+                "provider": f.get("provider", ""),
+                "model": f.get("model"),
+                "description": f.get("claim", f.get("description", "")),
+                "url": f.get("source", ""),
+                "type": f.get("category", "general"),
+                "action": f.get("importance", "monitor"),
+                "confidence": f.get("confidence", "medium"),
+            }
+            for f in merged_findings
+        ],
+        "new_providers": new_providers,
+        "new_models": new_models,
+        "pricing_changes": pricing_changes,
+        "free_tier_changes": free_tier_changes,
+        "breaking_changes": breaking_changes,
+        "action_items": action_items,
+        "sections": sections,
+        "_deterministic": llm_summary is None,
+    }
+
+
+def _merge_structured_findings(all_findings: list[dict]) -> list[dict]:
+    """Merge, deduplicate, resolve contradictions, and rank findings.
+
+    Args:
+        all_findings: List of structured finding dicts from all iterations
+
+    Returns:
+        Deduplicated, ranked list of findings
     """
+    if not all_findings:
+        return []
 
+    # Deduplicate by claim key (provider + normalized claim text)
+    claim_map: dict[str, dict] = {}
+    for f in all_findings:
+        if not isinstance(f, dict):
+            continue
+        provider = f.get("provider", "").lower().strip()
+        claim = f.get("claim", f.get("description", "")).lower().strip()[:150]
+        key = f"{provider}::{claim}"
+
+        if key not in claim_map:
+            claim_map[key] = f.copy()
+        else:
+            # Keep the version with higher confidence
+            existing = claim_map[key]
+            conf_rank = {"high": 3, "medium": 2, "low": 1}
+            existing_rank = conf_rank.get(existing.get("confidence", "medium"), 0)
+            new_rank = conf_rank.get(f.get("confidence", "medium"), 0)
+            if new_rank > existing_rank:
+                claim_map[key] = f.copy()
+
+    # Separate contradictions from normal findings
+    contradictions = []
+    normal_findings = []
+    for f in claim_map.values():
+        if f.get("verification_status") == "contradiction":
+            contradictions.append(f)
+        else:
+            normal_findings.append(f)
+
+    # Resolve contradictions: keep the most recent high-confidence version
+    resolved = {}
+    for c in contradictions:
+        provider = c.get("provider", "").lower().strip()
+        claim = c.get("claim", "").lower().strip()[:150]
+        # Use claim text without "contradiction" prefix as the key
+        clean_claim = claim.replace("contradiction:", "").replace("contradicts:", "").strip()
+        rkey = f"{provider}::{clean_claim}"
+        if rkey not in resolved:
+            resolved[rkey] = c
+        else:
+            conf_rank = {"high": 3, "medium": 2, "low": 1}
+            if conf_rank.get(c.get("confidence", "low"), 0) > conf_rank.get(resolved[rkey].get("confidence", "low"), 0):
+                resolved[rkey] = c
+
+    # Add resolved contradictions back as verified findings
+    for r in resolved.values():
+        r["verification_status"] = "verified"
+        normal_findings.append(r)
+
+    # Rank by importance
+    importance_rank = {
+        "add_provider": 0,
+        "update": 1,
+        "deprecation": 2,
+        "breaking": 2,
+        "free_tier": 3,
+        "model": 4,
+        "pricing": 5,
+        "monitor": 6,
+        "none": 7,
+    }
+    normal_findings.sort(key=lambda x: importance_rank.get(x.get("importance", "none"), 99))
+
+    logger.info("MERGE: %d raw -> %d deduplicated -> %d final findings",
+                len(all_findings), len(claim_map), len(normal_findings))
+    return normal_findings
+
+
+def _build_report_sections(
+    merged_findings: list[dict],
+    verified_claims: list,
+    unverified_claims: list,
+    open_questions: list,
+    resolved_questions: list,
+    contradictions: list,
+    quality_metrics: dict,
+    history: list,
+    iteration: int,
+) -> dict:
+    """Build deterministic report sections from structured state.
+
+    Never uses LLM — all sections computed from JSON data.
+    """
+    # Executive Summary
+    total_findings = len(merged_findings)
+    high_conf = len([f for f in merged_findings if f.get("confidence") == "high"])
+    providers_found = set(f.get("provider", "") for f in merged_findings if f.get("provider"))
+    categories = set(f.get("category", "") for f in merged_findings if f.get("category"))
+
+    exec_summary = (
+        f"Research completed over {iteration} iteration{'s' if iteration != 1 else ''}, "
+        f"analyzing {total_findings} findings from {len(providers_found)} providers. "
+        f"{high_conf} findings have high confidence. "
+        f"Covered categories: {', '.join(sorted(categories)) or 'general'}. "
+    )
+
+    if verified_claims:
+        exec_summary += f"{len(verified_claims)} claims verified. "
+    if unverified_claims:
+        exec_summary += f"{len(unverified_claims)} claims awaiting verification. "
+    if open_questions:
+        exec_summary += f"{len(open_questions)} open questions remain. "
+
+    # Verified Findings
+    verified_findings = []
+    for claim in verified_claims:
+        if isinstance(claim, dict):
+            verified_findings.append({
+                "claim": claim.get("claim", str(claim)),
+                "evidence": claim.get("evidence", ""),
+                "source": claim.get("source", ""),
+                "confidence": claim.get("confidence", "medium"),
+            })
+        else:
+            verified_findings.append({"claim": str(claim), "evidence": "", "source": "", "confidence": "medium"})
+
+    # Important Changes
+    important_changes = []
+    for f in merged_findings:
+        if f.get("importance") in ("add_provider", "update") or f.get("category") in ("deprecation", "breaking"):
+            important_changes.append({
+                "provider": f.get("provider", ""),
+                "description": f.get("claim", ""),
+                "type": f.get("category", ""),
+                "confidence": f.get("confidence", "medium"),
+            })
+
+    # Statistics
+    stats = {
+        "iterations": iteration,
+        "total_findings": total_findings,
+        "high_confidence_findings": high_conf,
+        "providers_analyzed": len(providers_found),
+        "verified_claims": len(verified_claims),
+        "unverified_claims": len(unverified_claims),
+        "open_questions": len(open_questions),
+        "resolved_questions": len(resolved_questions),
+        "contradictions_detected": len(contradictions),
+        "overall_quality": quality_metrics.get("overall_quality", 0),
+        "coverage": quality_metrics.get("coverage", 0),
+        "verification_score": quality_metrics.get("verification", 0),
+    }
+
+    return {
+        "executive_summary": exec_summary,
+        "verified_findings": verified_findings,
+        "important_changes": important_changes,
+        "open_questions": open_questions,
+        "unverified_claims": [
+            c if isinstance(c, dict) else {"claim": str(c)}
+            for c in unverified_claims
+        ],
+        "contradictions": [
+            c if isinstance(c, dict) else {"claim": str(c)}
+            for c in contradictions
+        ],
+        "statistics": stats,
+    }
+
+
+def _llm_generate_narrative(
+    sections: dict,
+    config: Config,
+    key_manager: KeyManager,
+    runtime_state: dict,
+) -> Optional[str]:
+    """Use LLM to write a polished narrative from deterministic sections.
+
+    This is an OPTIONAL enhancement. If it fails, the deterministic
+    executive_summary is used instead.
+
+    Args:
+        sections: Deterministic report sections
+        config: System configuration
+        key_manager: Key manager instance
+        runtime_state: Runtime state dict
+
+    Returns:
+        Polished narrative string, or None on failure
+    """
     rotator = KeyRotator(config, key_manager)
     provider_name = config.active_provider
+
     try:
         provider = create_provider(provider_name)
-    except Exception as e:
-        logger.error("Cannot create provider to generate final report: %s", e)
-        return _build_raw_fallback_final(combined_context)
+    except ValueError as e:
+        logger.error("Cannot create provider for narrative: %s", e)
+        return None
+
+    # Build a compact prompt with structured data (not raw markdown)
+    prompt_data = {
+        "executive_summary": sections.get("executive_summary", ""),
+        "statistics": sections.get("statistics", {}),
+        "important_changes": sections.get("important_changes", [])[:10],
+        "verified_count": len(sections.get("verified_findings", [])),
+        "open_questions_count": len(sections.get("open_questions", [])),
+    }
+
+    narrative_prompt = f"""You are a senior AI industry analyst. Write a concise, professional briefing based on these research findings.
+
+Data:
+{json.dumps(prompt_data, indent=2)}
+
+Write a 2-3 paragraph executive briefing covering:
+1. Key provider updates and model releases
+2. Pricing and free-tier changes
+3. Breaking changes requiring attention
+4. Recommended actions
+
+Be specific with provider names and details. Write in a professional, concise style suitable for an industry briefing."""
 
     messages = [
-        ChatMessage(role="system", content="You are a report consolidation assistant. Respond only with valid JSON."),
-        ChatMessage(role="user", content=merge_prompt.format(
-            verified_claims=verified_claims,
-            unverified_claims=unverified_claims,
-            contradictions=contradictions,
-        ) + f"\n\nLong-Term Memory:\n{ltm}\n\nIterations:\n{combined_context}"),
+        ChatMessage(role="system", content="You are a senior AI industry analyst. Write a professional briefing."),
+        ChatMessage(role="user", content=narrative_prompt),
     ]
+
     model = provider.get_default_model()
 
     def request_fn(api_key: str):
@@ -1226,23 +1487,107 @@ def generate_final_report(config: Config, key_manager: KeyManager, runtime_state
 
     result = rotator.execute_with_rotation(provider_name, request_fn)
     if not result.success or not result.response:
-        logger.error("LLM final report consolidation failed: %s", result.error)
-        return _build_raw_fallback_final(combined_context)
+        logger.error("LLM narrative generation failed: %s", result.error)
+        return None
 
-    parsed = _parse_findings(result.response.content)
-    if parsed:
-        return parsed
-    return _build_raw_fallback_final(combined_context)
+    narrative = result.response.content.strip()
+    if len(narrative) < 50:
+        logger.warning("LLM narrative too short (%d chars), using deterministic summary", len(narrative))
+        return None
+
+    return narrative
 
 
-def _build_raw_fallback_final(combined_context: str) -> dict:
-    """Fallback when final consolidation fails."""
+def _build_deterministic_report(runtime_state: dict) -> dict:
+    """Build a complete report from runtime state without any LLM calls.
+
+    Used as the final fallback when LLM synthesis completely fails.
+    Always produces a readable, structured report.
+
+    Args:
+        runtime_state: RuntimeManager state dict
+
+    Returns:
+        Complete report dict
+    """
+    iteration = runtime_state.get("iteration", 1)
+    verified_claims = runtime_state.get("verified_claims", [])
+    unverified_claims = runtime_state.get("unverified_claims", [])
+    open_questions = runtime_state.get("open_questions", [])
+    resolved_questions = runtime_state.get("resolved_questions", [])
+    contradictions = runtime_state.get("contradictions", [])
+    quality_metrics = runtime_state.get("quality_metrics", {})
+    history = runtime_state.get("history", [])
+
+    # Try to load merged findings from disk
+    research_dir = runtime_state.get("_research_dir")
+    merged_findings = []
+    if research_dir:
+        for i in range(1, iteration + 1):
+            findings_file = Path(research_dir) / f"iteration_{i}_findings.json"
+            if findings_file.exists():
+                try:
+                    with open(findings_file) as f:
+                        data = json.load(f)
+                    merged_findings.extend(data.get("findings", []))
+                except Exception:
+                    pass
+
+    merged_findings = _merge_structured_findings(merged_findings)
+    sections = _build_report_sections(
+        merged_findings=merged_findings,
+        verified_claims=verified_claims,
+        unverified_claims=unverified_claims,
+        open_questions=open_questions,
+        resolved_questions=resolved_questions,
+        contradictions=contradictions,
+        quality_metrics=quality_metrics,
+        history=history,
+        iteration=iteration,
+    )
+
+    # Build findings list for downstream consumers
+    findings_list = [
+        {
+            "provider": f.get("provider", ""),
+            "model": f.get("model"),
+            "description": f.get("claim", f.get("description", "")),
+            "url": f.get("source", ""),
+            "type": f.get("category", "general"),
+            "action": f.get("importance", "monitor"),
+            "confidence": f.get("confidence", "medium"),
+        }
+        for f in merged_findings
+    ]
+
     return {
-        "findings": [],
-        "summary": f"# Consolidated Research Report (Fallback)\n\nFailed to consolidate via LLM. Here is the raw history:\n\n{combined_context}",
-        "new_providers": [],
-        "new_models": [],
-        "pricing_changes": [],
-        "free_tier_changes": [],
-        "breaking_changes": [],
+        "summary": sections["executive_summary"],
+        "findings": findings_list,
+        "new_providers": [
+            f.get("provider", "") for f in merged_findings
+            if f.get("importance") == "add_provider"
+        ],
+        "new_models": [
+            f.get("claim", "") for f in merged_findings
+            if f.get("category") == "model"
+        ],
+        "pricing_changes": [
+            f.get("claim", "") for f in merged_findings
+            if f.get("category") == "pricing"
+        ],
+        "free_tier_changes": [
+            f.get("claim", "") for f in merged_findings
+            if f.get("category") == "free_tier"
+        ],
+        "breaking_changes": [
+            f.get("claim", "") for f in merged_findings
+            if f.get("category") in ("deprecation", "breaking")
+        ],
+        "action_items": [
+            f"Review: {f.get('claim', f.get('description', ''))[:100]}"
+            for f in merged_findings
+            if f.get("importance") in ("add_provider", "update")
+        ],
+        "sections": sections,
+        "_deterministic": True,
     }

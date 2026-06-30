@@ -15,6 +15,18 @@ QUALITY_METRIC_KEYS = [
     "novel_information", "contradictions_resolved", "overall_quality",
 ]
 
+# Research queue item categories
+QUEUE_CATEGORIES = [
+    "exploration",       # Initial discovery of providers/models
+    "verification",      # Verify unverified claims with direct evidence
+    "contradiction_resolution",  # Resolve conflicting claims
+    "gap_filling",       # Fill gaps in knowledge (open questions)
+    "confidence_improvement",    # Strengthen weak conclusions
+]
+
+# Similarity threshold for repetition detection
+REPETITION_SIMILARITY_THRESHOLD = 0.80
+
 
 class RuntimeManager:
     """Manages the persistent state and execution decisions for the research workflow."""
@@ -84,7 +96,10 @@ class RuntimeManager:
                 "contradictions_resolved": 0,
                 "overall_quality": 0,
                 "reason": "Initial state"
-            }
+            },
+
+            # Iteration findings history (structured JSON)
+            "findings_history": [],
         }
         self.save_state()
 
@@ -466,6 +481,14 @@ class RuntimeManager:
         self.state["research_questions"] = self.state["open_questions"]
         self.state["assumptions"] = evaluation.get("assumptions", self.state.get("assumptions", []))
 
+        # Save structured findings for this iteration
+        self._save_iteration_findings(findings, validated_metrics)
+
+        # Add new queue items from evaluation
+        new_queue_items = evaluation.get("research_queue", [])
+        if new_queue_items:
+            self.add_queue_items(new_queue_items)
+
         # Log entry to history
         self.state["history"].append({
             "iteration": self.state["iteration"],
@@ -480,12 +503,442 @@ class RuntimeManager:
             self.state["final_report_ready"] = True
         self.save_state()
 
+    def _save_iteration_findings(self, findings: list, quality_metrics: dict) -> None:
+        """Save structured findings for this iteration to disk and state history.
+
+        Writes JSON file to data/research/iteration_N_findings.json and
+        appends a summary entry to state['findings_history'].
+        """
+        iteration = self.state.get("iteration", 1)
+        research_dir = self.data_dir / "research"
+        research_dir.mkdir(parents=True, exist_ok=True)
+
+        # Build structured finding entries
+        structured_findings = []
+        for f in findings:
+            if isinstance(f, dict):
+                structured_findings.append({
+                    "claim": f.get("description", f.get("claim", "")),
+                    "evidence": f.get("evidence", ""),
+                    "source": f.get("url", f.get("source", "")),
+                    "confidence": f.get("confidence", "medium"),
+                    "verification_status": f.get("verification_status", "unverified"),
+                    "category": f.get("type", "general"),
+                    "importance": f.get("action", "none"),
+                    "provider": f.get("provider", ""),
+                    "model": f.get("model"),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+
+        # Write findings JSON file
+        findings_file = research_dir / f"iteration_{iteration}_findings.json"
+        findings_data = {
+            "iteration": iteration,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "findings": structured_findings,
+            "quality_metrics": quality_metrics,
+        }
+        try:
+            with open(findings_file, "w") as f:
+                json.dump(findings_data, f, indent=2)
+            logger.info("Saved structured findings to %s (%d findings)",
+                         findings_file, len(structured_findings))
+        except Exception as e:
+            logger.error("Failed to save findings to %s: %s", findings_file, e)
+
+        # Append summary to state history
+        if "findings_history" not in self.state:
+            self.state["findings_history"] = []
+        self.state["findings_history"].append({
+            "iteration": iteration,
+            "findings_count": len(structured_findings),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "file": str(findings_file.name),
+        })
+
     def increment_iteration(self) -> None:
         """Move to the next iteration step."""
         prev = self.state.get("iteration", 1)
         self.state["iteration"] = prev + 1
         logger.info("Incremented runtime iteration: %d -> %d", prev, self.state["iteration"])
         self.save_state()
+
+    # ─── Research Queue Management ───────────────────────────────────────
+
+    def initialize_research_queue(self) -> None:
+        """Seed the research queue for iteration 1 with exploration items.
+
+        Called at the start of a new cycle to populate the queue
+        with initial research objectives.
+        """
+        queue = self.state.get("research_queue", [])
+        # Check if queue already has pending dict items
+        has_dict_items = any(isinstance(i, dict) and i.get("status") == "pending" for i in queue)
+        if has_dict_items:
+            return
+
+        queue = [
+            {
+                "topic": "Discover all available AI providers and their offerings",
+                "category": "exploration",
+                "priority": 1,
+                "added_iteration": 1,
+                "status": "pending",
+            },
+            {
+                "topic": "Identify new model releases from major providers",
+                "category": "exploration",
+                "priority": 1,
+                "added_iteration": 1,
+                "status": "pending",
+            },
+            {
+                "topic": "Check pricing and free-tier changes across providers",
+                "category": "exploration",
+                "priority": 2,
+                "added_iteration": 1,
+                "status": "pending",
+            },
+            {
+                "topic": "Identify API deprecations and breaking changes",
+                "category": "exploration",
+                "priority": 2,
+                "added_iteration": 1,
+                "status": "pending",
+            },
+        ]
+        self.state["research_queue"] = queue
+        self.save_state()
+        logger.info("RESEARCH QUEUE: Seeded with %d exploration items", len(queue))
+
+    def consume_queue_items(self, count: int = 3) -> list[dict]:
+        """Remove and return up to `count` pending items from the research queue.
+
+        Returns the highest-priority pending items first.
+        Handles both string and dict items.
+        """
+        queue = self.state.get("research_queue", [])
+        pending = []
+        for item in queue:
+            if isinstance(item, dict) and item.get("status") == "pending":
+                pending.append(item)
+            elif isinstance(item, str):
+                # Convert legacy string items to dict format
+                pending.append({
+                    "topic": item,
+                    "status": "pending",
+                    "priority": 2,
+                    "category": "exploration",
+                })
+
+        pending.sort(key=lambda x: x.get("priority", 99))
+
+        to_consume = pending[:count]
+        consumed_topics = {item.get("topic", "") for item in to_consume}
+
+        # Mark consumed items as done
+        for item in queue:
+            if isinstance(item, dict):
+                if item.get("topic", "") in consumed_topics:
+                    item["status"] = "completed"
+            elif isinstance(item, str) and item in consumed_topics:
+                # Convert string to dict and mark completed
+                idx = queue.index(item)
+                queue[idx] = {"topic": item, "status": "completed", "priority": 2, "category": "exploration"}
+
+        self.state["research_queue"] = queue
+        self.save_state()
+
+        logger.info("RESEARCH QUEUE: Consumed %d items (%d remaining pending)",
+                     len(to_consume),
+                     len([i for i in queue if isinstance(i, dict) and i.get("status") == "pending"]))
+        return to_consume
+
+    def add_queue_items(self, items: list[dict]) -> None:
+        """Add new items to the research queue.
+
+        Deduplicates by topic text. Only adds items with status='pending'.
+        Handles both string and dict items in the existing queue.
+        """
+        queue = self.state.get("research_queue", [])
+        existing_topics = set()
+        for item in queue:
+            if isinstance(item, dict):
+                existing_topics.add(item.get("topic", ""))
+            elif isinstance(item, str):
+                existing_topics.add(item)
+
+        added = 0
+        for item in items:
+            if isinstance(item, str):
+                topic = item
+                item = {"topic": topic}
+            elif isinstance(item, dict):
+                topic = item.get("topic", "")
+            else:
+                continue
+
+            if topic and topic not in existing_topics:
+                if "status" not in item:
+                    item["status"] = "pending"
+                if "added_iteration" not in item:
+                    item["added_iteration"] = self.state.get("iteration", 1)
+                if "priority" not in item:
+                    item["priority"] = 2
+                if "category" not in item:
+                    item["category"] = "gap_filling"
+                queue.append(item)
+                existing_topics.add(topic)
+                added += 1
+
+        self.state["research_queue"] = queue
+        self.save_state()
+        if added:
+            logger.info("RESEARCH QUEUE: Added %d new items (%d total)", added, len(queue))
+
+    def get_research_focus(self) -> dict:
+        """Determine what this iteration should research based on queue and state.
+
+        Returns a dict with:
+        - objectives: list of specific research objectives
+        - category: primary research category for this iteration
+        - queue_items: items to consume this iteration
+        """
+        iteration = self.state.get("iteration", 1)
+        max_iter = self.state.get("max_iterations", 8)
+
+        queue = self.state.get("research_queue", [])
+        pending = []
+        for item in queue:
+            if isinstance(item, dict) and item.get("status") == "pending":
+                pending.append(item)
+            elif isinstance(item, str):
+                pending.append({
+                    "topic": item,
+                    "status": "pending",
+                    "priority": 2,
+                    "category": "exploration",
+                })
+
+        # Determine research phase based on iteration progress
+        progress = iteration / max_iter if max_iter > 0 else 0
+
+        if iteration == 1:
+            # Phase 1: General exploration
+            category = "exploration"
+            objectives = [
+                "Discover all available AI providers and their current offerings",
+                "Identify recent model releases and announcements",
+                "Collect pricing and free-tier information",
+            ]
+        elif progress < 0.3:
+            # Phase 2: Investigate unanswered questions
+            category = "gap_filling"
+            open_q = self.state.get("open_questions", [])
+            objectives = [f"Investigate: {q}" for q in open_q[:3]] or [
+                "Identify information gaps in current research",
+                "Research areas with low confidence findings",
+            ]
+        elif progress < 0.5:
+            # Phase 3: Verify claims
+            category = "verification"
+            unverified = self.state.get("unverified_claims", [])
+            objectives = [f"Verify: {self._get_claim_key(c)}" for c in unverified[:3]] or [
+                "Verify claims with independent sources",
+                "Cross-reference findings across multiple sources",
+            ]
+        elif progress < 0.7:
+            # Phase 4: Resolve contradictions
+            category = "contradiction_resolution"
+            contradictions = self.state.get("contradictions", [])
+            unresolved = [c for c in contradictions
+                         if isinstance(c, dict) and c.get("resolution_status") != "resolved"]
+            objectives = [f"Resolve: {c.get('claim', str(c))[:80]}" for c in unresolved[:3]] or [
+                "Check for conflicting information across sources",
+                "Validate consistency of findings",
+            ]
+        else:
+            # Phase 5+: Improve confidence and fill remaining gaps
+            category = "confidence_improvement"
+            objectives = [
+                "Strengthen weak conclusions with additional evidence",
+                "Fill remaining knowledge gaps",
+                "Final verification of key findings",
+            ]
+
+        # Consume queue items relevant to current category
+        relevant_items = [item for item in pending if item.get("category") == category]
+        queue_items = relevant_items[:3] if relevant_items else pending[:2]
+
+        return {
+            "objectives": objectives,
+            "category": category,
+            "queue_items": queue_items,
+            "iteration": iteration,
+            "progress": round(progress, 2),
+        }
+
+    # ─── Iteration Similarity Detection ──────────────────────────────────
+
+    @staticmethod
+    def _extract_finding_keys(findings: list) -> set[str]:
+        """Extract normalized keys from findings for similarity comparison.
+
+        Keys are based on provider + description/model (lowercased, stripped).
+        """
+        keys = set()
+        for f in findings:
+            if isinstance(f, dict):
+                provider = f.get("provider", "").lower().strip()
+                desc = f.get("description", f.get("model", f.get("claim", ""))).lower().strip()[:100]
+                if provider or desc:
+                    keys.add(f"{provider}:{desc}")
+            elif isinstance(f, str):
+                keys.add(f.lower().strip()[:100])
+        return keys
+
+    def compute_iteration_similarity(self, findings_a: list, findings_b: list) -> float:
+        """Compute Jaccard similarity between two sets of findings.
+
+        Returns float between 0.0 (completely different) and 1.0 (identical).
+        """
+        keys_a = self._extract_finding_keys(findings_a)
+        keys_b = self._extract_finding_keys(findings_b)
+
+        if not keys_a and not keys_b:
+            return 1.0  # Both empty = identical
+        if not keys_a or not keys_b:
+            return 0.0  # One empty = completely different
+
+        intersection = keys_a & keys_b
+        union = keys_a | keys_b
+        return len(intersection) / len(union) if union else 0.0
+
+    def detect_repetition(self, current_findings: list) -> dict:
+        """Compare current findings with previous iteration to detect repetition.
+
+        Returns dict with:
+        - is_repeated: bool
+        - similarity: float (0-1)
+        - previous_iteration: int or None
+        - strategy_shift: suggested action if repetition detected
+        """
+        history = self.state.get("history", [])
+        if len(history) < 2:
+            return {
+                "is_repeated": False,
+                "similarity": 0.0,
+                "previous_iteration": None,
+                "strategy_shift": None,
+            }
+
+        # Compare with the most recent previous iteration's findings
+        # We need to load the previous iteration's findings from the findings history
+        prev_entry = history[-2] if len(history) >= 2 else None
+        if not prev_entry:
+            return {
+                "is_repeated": False,
+                "similarity": 0.0,
+                "previous_iteration": None,
+                "strategy_shift": None,
+            }
+
+        prev_iteration = prev_entry.get("iteration", 0)
+        prev_findings_count = prev_entry.get("findings_count", 0)
+
+        # Load previous iteration's findings from disk if available
+        prev_findings = self._load_iteration_findings(prev_iteration)
+        if not prev_findings:
+            return {
+                "is_repeated": False,
+                "similarity": 0.0,
+                "previous_iteration": prev_iteration,
+                "strategy_shift": None,
+            }
+
+        similarity = self.compute_iteration_similarity(current_findings, prev_findings)
+        is_repeated = similarity >= REPETITION_SIMILARITY_THRESHOLD
+
+        strategy_shift = None
+        if is_repeated:
+            strategy_shift = self._suggest_strategy_shift()
+            logger.warning(
+                "REPETITION DETECTED: %.1f similarity with iteration %d. Strategy shift: %s",
+                similarity, prev_iteration, strategy_shift.get("category", "unknown"),
+            )
+
+        return {
+            "is_repeated": is_repeated,
+            "similarity": round(similarity, 3),
+            "previous_iteration": prev_iteration,
+            "strategy_shift": strategy_shift,
+        }
+
+    def _load_iteration_findings(self, iteration: int) -> list:
+        """Load findings from a previous iteration's JSON file."""
+        findings_file = self.data_dir / "research" / f"iteration_{iteration}_findings.json"
+        if findings_file.exists():
+            try:
+                with open(findings_file) as f:
+                    data = json.load(f)
+                return data.get("findings", [])
+            except Exception as e:
+                logger.warning("Could not load findings for iteration %d: %s", iteration, e)
+        return []
+
+    def _suggest_strategy_shift(self) -> dict:
+        """Suggest a new research strategy when repetition is detected.
+
+        Analyzes current state and returns a shifted focus.
+        """
+        iteration = self.state.get("iteration", 1)
+        unverified = self.state.get("unverified_claims", [])
+        open_q = self.state.get("open_questions", [])
+        contradictions = self.state.get("contradictions", [])
+        queue = self.state.get("research_queue", [])
+        pending = [i for i in queue if i.get("status") == "pending"]
+
+        # Priority: contradictions > unverified claims > open questions > new sources
+        if contradictions:
+            unresolved = [c for c in contradictions
+                         if isinstance(c, dict) and c.get("resolution_status") != "resolved"]
+            if unresolved:
+                return {
+                    "category": "contradiction_resolution",
+                    "objectives": [
+                        f"Resolve contradiction: {c.get('claim', str(c))[:80]}"
+                        for c in unresolved[:3]
+                    ],
+                    "reason": "Repetition detected — switching to contradiction resolution",
+                }
+
+        if unverified:
+            return {
+                "category": "verification",
+                "objectives": [
+                    f"Verify claim: {self._get_claim_key(c)}"
+                    for c in unverified[:3]
+                ],
+                "reason": "Repetition detected — switching to claim verification",
+            }
+
+        if open_q:
+            return {
+                "category": "gap_filling",
+                "objectives": [f"Answer question: {q}" for q in open_q[:3]],
+                "reason": "Repetition detected — switching to gap filling",
+            }
+
+        # Fallback: explore different sources
+        return {
+            "category": "exploration",
+            "objectives": [
+                "Search alternative sources not yet checked",
+                "Investigate niche providers and emerging models",
+                "Check community forums and developer discussions",
+            ],
+            "reason": "Repetition detected — switching to alternative source exploration",
+        }
 
     def archive_cycle(self) -> None:
         """Archive all files and state associated with the completed cycle, then reset."""

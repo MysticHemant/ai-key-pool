@@ -66,6 +66,9 @@ def _run_single_iteration(
 ) -> dict:
     """Execute a single research iteration.
 
+    Uses the research queue to determine focus, checks for repetition,
+    and saves structured findings alongside markdown.
+
     Returns:
         Dict with 'success', 'findings_count', 'has_llm_summary', 'duration_seconds'
     """
@@ -74,13 +77,39 @@ def _run_single_iteration(
 
     logger.info("===== ITERATION %d =====", iteration)
 
-    # Research planning
+    # Initialize queue on first iteration
+    if iteration == 1:
+        runtime_manager.initialize_research_queue()
+
+    # Get research focus from queue
+    research_focus = runtime_manager.get_research_focus()
+    logger.info("Research focus: category=%s, objectives=%s",
+                research_focus.get("category", "unknown"),
+                research_focus.get("objectives", []))
+
+    # Inject focus into runtime state for the planner
+    runtime_state["current_plan"] = {
+        "objectives": research_focus.get("objectives", []),
+        "category": research_focus.get("category", "exploration"),
+        "queue_items": [
+            {"topic": item.get("topic", ""), "category": item.get("category", "")}
+            for item in research_focus.get("queue_items", [])
+        ],
+    }
+
+    # Research planning (enhanced with queue context)
     if config.research_planner_enabled:
         logger.info("Generating research plan for iteration %d", iteration)
         plan = generate_research_plan(config, key_manager, runtime_state)
-        runtime_manager.state["current_plan"] = plan
+        # Merge queue objectives with LLM plan
+        if plan.get("objectives"):
+            runtime_state["current_plan"]["objectives"] = plan["objectives"]
+        if plan.get("claims_to_verify"):
+            runtime_state["current_plan"]["claims_to_verify"] = plan["claims_to_verify"]
+        if plan.get("questions_to_answer"):
+            runtime_state["current_plan"]["questions_to_answer"] = plan["questions_to_answer"]
         runtime_manager.save_state()
-        logger.info("Research plan: Objectives=%s", plan.get("objectives", []))
+        logger.info("Research plan: Objectives=%s", runtime_state["current_plan"].get("objectives", []))
 
     # Memory compression
     if iteration > config.memory_compression_threshold:
@@ -118,7 +147,27 @@ def _run_single_iteration(
             "duration_seconds": round(research_duration, 2),
         }
 
-    # Save iteration report
+    # Check for repetition before updating state
+    current_findings = research_data.get("findings", [])
+    repetition = runtime_manager.detect_repetition(current_findings)
+    if repetition.get("is_repeated"):
+        logger.warning(
+            "REPETITION DETECTED: %.1f similarity with iteration %d. Applying strategy shift.",
+            repetition.get("similarity", 0),
+            repetition.get("previous_iteration", 0),
+        )
+        strategy = repetition.get("strategy_shift", {})
+        if strategy:
+            # Override plan with shifted strategy
+            runtime_state["current_plan"] = {
+                "objectives": strategy.get("objectives", []),
+                "category": strategy.get("category", "exploration"),
+                "reason": strategy.get("reason", "Repetition detected"),
+            }
+            runtime_manager.save_state()
+            logger.info("Strategy shift applied: %s", strategy.get("reason", ""))
+
+    # Save iteration report (markdown export)
     research_dir = config.data_dir / "research"
     research_dir.mkdir(parents=True, exist_ok=True)
     iter_file = research_dir / f"iteration_{iteration}.md"
@@ -152,11 +201,11 @@ def _run_single_iteration(
 """
     try:
         iter_file.write_text(markdown_content, encoding="utf-8")
-        logger.info("Saved iteration report to %s", iter_file)
+        logger.info("Saved iteration report to %s (markdown export)", iter_file)
     except Exception as e:
         logger.error("Failed to write iteration report to %s: %s", iter_file, e)
 
-    # Update runtime state
+    # Update runtime state (this also saves structured findings JSON)
     eval_data = research_data.get("evaluation", {})
     logger.info("=== EVAL_DATA BEFORE RuntimeManager ===")
     logger.info("type(eval_data): %s", type(eval_data).__name__)
@@ -167,7 +216,30 @@ def _run_single_iteration(
         logger.info("eval_data verification: %s", eval_data.get("verification", "MISSING"))
         logger.info("eval_data verified_claims count: %d", len(eval_data.get("verified_claims", [])))
     logger.info("=======================================")
-    runtime_manager.update_state(eval_data, research_data.get("findings", []))
+    runtime_manager.update_state(eval_data, current_findings)
+
+    # Consume queue items that were researched this iteration
+    consumed = runtime_manager.consume_queue_items(count=len(research_focus.get("queue_items", [])) or 2)
+    logger.info("Consumed %d queue items this iteration", len(consumed))
+
+    # Add new queue items from unanswered questions and contradictions
+    report_unanswered = report_data.get("unanswered_questions", [])
+    report_contradictions = report_data.get("contradictions", [])
+    new_items = []
+    for q in report_unanswered[:3]:
+        new_items.append({
+            "topic": f"Answer: {q}" if isinstance(q, str) else str(q),
+            "category": "gap_filling",
+            "priority": 2,
+        })
+    for c in report_contradictions[:3]:
+        new_items.append({
+            "topic": f"Resolve: {c}" if isinstance(c, str) else str(c),
+            "category": "contradiction_resolution",
+            "priority": 1,
+        })
+    if new_items:
+        runtime_manager.add_queue_items(new_items)
 
     # Iteration diagnostics
     metrics = runtime_manager.state.get("quality_metrics", {})
@@ -180,6 +252,9 @@ def _run_single_iteration(
                 metrics.get("source_diversity", 0))
     logger.info("  Verified Claims: %d", len(runtime_manager.state.get("verified_claims", [])))
     logger.info("  Open Questions: %d", len(runtime_manager.state.get("open_questions", [])))
+    logger.info("  Queue Items Pending: %d",
+                len([i for i in runtime_manager.state.get("research_queue", [])
+                     if i.get("status") == "pending"]))
     logger.info("===== END ITERATION %d =====", iteration)
 
     return {
@@ -435,6 +510,8 @@ def run_daily_maintenance() -> dict:
 
     # ── Step 3: Generate final report ──
     logger.info("STEP START: Final report generation")
+    # Inject research_dir into runtime state for deterministic fallback
+    runtime_manager.state["_research_dir"] = str(config.data_dir / "research")
     final_report, report_duration = _time_step(
         generate_final_report, config, key_manager, runtime_manager.state
     )

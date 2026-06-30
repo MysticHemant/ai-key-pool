@@ -846,6 +846,251 @@ def test_helper_methods():
     print("    PASSED")
 
 
+def test_research_queue_initialization():
+    """Test that research queue is seeded with exploration items."""
+    print("  - Running test_research_queue_initialization...")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        config = Config(research_max_iterations=5)
+        manager = RuntimeManager(tmp_path, config=config)
+
+        # Queue should be empty initially
+        assert len(manager.state.get("research_queue", [])) == 0
+
+        # Initialize queue
+        manager.initialize_research_queue()
+
+        # Queue should have exploration items
+        queue = manager.state["research_queue"]
+        assert len(queue) > 0
+        assert all(item.get("status") == "pending" for item in queue)
+        assert any(item.get("category") == "exploration" for item in queue)
+
+        # Calling again should not duplicate
+        manager.initialize_research_queue()
+        assert len(manager.state["research_queue"]) == len(queue)
+    print("    PASSED")
+
+
+def test_research_queue_consume():
+    """Test consuming items from the research queue."""
+    print("  - Running test_research_queue_consume...")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        config = Config(research_max_iterations=5)
+        manager = RuntimeManager(tmp_path, config=config)
+
+        manager.initialize_research_queue()
+        initial_count = len([i for i in manager.state["research_queue"] if i.get("status") == "pending"])
+
+        # Consume 2 items
+        consumed = manager.consume_queue_items(2)
+        assert len(consumed) == 2
+
+        # Check remaining
+        remaining = [i for i in manager.state["research_queue"] if i.get("status") == "pending"]
+        assert len(remaining) == initial_count - 2
+
+        # Consumed items should be marked completed
+        for item in consumed:
+            assert item.get("status") == "completed"
+    print("    PASSED")
+
+
+def test_research_queue_add_items():
+    """Test adding items to the research queue with deduplication."""
+    print("  - Running test_research_queue_add_items...")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        config = Config(research_max_iterations=5)
+        manager = RuntimeManager(tmp_path, config=config)
+
+        manager.initialize_research_queue()
+        initial_count = len(manager.state["research_queue"])
+
+        # Add new items
+        new_items = [
+            {"topic": "Verify Groq pricing", "category": "verification", "priority": 1},
+            {"topic": "Check Anthropic free tier", "category": "gap_filling", "priority": 2},
+        ]
+        manager.add_queue_items(new_items)
+        assert len(manager.state["research_queue"]) == initial_count + 2
+
+        # Add duplicate — should not increase count
+        manager.add_queue_items([{"topic": "Verify Groq pricing", "category": "verification"}])
+        assert len(manager.state["research_queue"]) == initial_count + 2
+    print("    PASSED")
+
+
+def test_research_queue_focus():
+    """Test that research focus changes based on iteration progress."""
+    print("  - Running test_research_queue_focus...")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        config = Config(research_max_iterations=8)
+        manager = RuntimeManager(tmp_path, config=config)
+
+        # Iteration 1: exploration
+        manager.state["iteration"] = 1
+        focus = manager.get_research_focus()
+        assert focus["category"] == "exploration"
+        assert len(focus["objectives"]) > 0
+
+        # Iteration 2 (progress 0.25): gap filling
+        manager.state["iteration"] = 2
+        focus = manager.get_research_focus()
+        assert focus["category"] == "gap_filling"
+
+        # Iteration 3 (progress 0.375): verification
+        manager.state["iteration"] = 3
+        focus = manager.get_research_focus()
+        assert focus["category"] == "verification"
+
+        # Iteration 5 (progress 0.625): contradiction resolution
+        manager.state["iteration"] = 5
+        focus = manager.get_research_focus()
+        assert focus["category"] == "contradiction_resolution"
+
+        # Iteration 7 (progress 0.875): confidence improvement
+        manager.state["iteration"] = 7
+        focus = manager.get_research_focus()
+        assert focus["category"] == "confidence_improvement"
+    print("    PASSED")
+
+
+def test_iteration_similarity_identical():
+    """Test that identical findings produce similarity of 1.0."""
+    print("  - Running test_iteration_similarity_identical...")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        config = Config(research_max_iterations=5)
+        manager = RuntimeManager(tmp_path, config=config)
+
+        findings_a = [
+            {"provider": "groq", "description": "New model released"},
+            {"provider": "openai", "description": "Pricing update"},
+        ]
+        findings_b = [
+            {"provider": "groq", "description": "New model released"},
+            {"provider": "openai", "description": "Pricing update"},
+        ]
+
+        similarity = manager.compute_iteration_similarity(findings_a, findings_b)
+        assert similarity == 1.0
+    print("    PASSED")
+
+
+def test_iteration_similarity_different():
+    """Test that completely different findings produce similarity of 0.0."""
+    print("  - Running test_iteration_similarity_different...")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        config = Config(research_max_iterations=5)
+        manager = RuntimeManager(tmp_path, config=config)
+
+        findings_a = [
+            {"provider": "groq", "description": "New model released"},
+        ]
+        findings_b = [
+            {"provider": "anthropic", "description": "Claude update"},
+        ]
+
+        similarity = manager.compute_iteration_similarity(findings_a, findings_b)
+        assert similarity == 0.0
+    print("    PASSED")
+
+
+def test_iteration_similarity_partial():
+    """Test partial overlap produces correct similarity."""
+    print("  - Running test_iteration_similarity_partial...")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        config = Config(research_max_iterations=5)
+        manager = RuntimeManager(tmp_path, config=config)
+
+        findings_a = [
+            {"provider": "groq", "description": "New model"},
+            {"provider": "openai", "description": "Pricing"},
+        ]
+        findings_b = [
+            {"provider": "groq", "description": "New model"},
+            {"provider": "anthropic", "description": "Claude"},
+        ]
+
+        similarity = manager.compute_iteration_similarity(findings_a, findings_b)
+        # 1 shared out of 3 total = 0.333
+        assert 0.3 < similarity < 0.4
+    print("    PASSED")
+
+
+def test_strategy_shift_suggestion():
+    """Test that strategy shift suggests appropriate category."""
+    print("  - Running test_strategy_shift_suggestion...")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        config = Config(research_max_iterations=5)
+        manager = RuntimeManager(tmp_path, config=config)
+
+        # With contradictions, should suggest contradiction resolution
+        manager.state["contradictions"] = [
+            {"claim": "Conflict A", "resolution_status": "unresolved"},
+        ]
+        shift = manager._suggest_strategy_shift()
+        assert shift["category"] == "contradiction_resolution"
+
+        # Without contradictions but with unverified claims, should suggest verification
+        manager.state["contradictions"] = []
+        manager.state["unverified_claims"] = ["Claim X"]
+        shift = manager._suggest_strategy_shift()
+        assert shift["category"] == "verification"
+
+        # With only open questions, should suggest gap filling
+        manager.state["unverified_claims"] = []
+        manager.state["open_questions"] = ["Question Y"]
+        shift = manager._suggest_strategy_shift()
+        assert shift["category"] == "gap_filling"
+
+        # With nothing, should suggest exploration
+        manager.state["open_questions"] = []
+        shift = manager._suggest_strategy_shift()
+        assert shift["category"] == "exploration"
+    print("    PASSED")
+
+
+def test_findings_history_tracking():
+    """Test that findings history is tracked in state."""
+    print("  - Running test_findings_history_tracking...")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        config = Config(research_max_iterations=5)
+        manager = RuntimeManager(tmp_path, config=config)
+
+        # Simulate update_state with findings
+        evaluation = {
+            "overall_quality": 70, "coverage": 60, "verification": 50,
+            "source_diversity": 55, "novel_information": 40,
+            "contradictions_resolved": 30, "reason": "test",
+            "verified_claims": [], "unverified_claims": [],
+            "resolved_questions": [], "open_questions": [],
+            "completed_topics": [], "research_queue": [],
+            "contradictions": [],
+        }
+        findings = [
+            {"provider": "groq", "description": "Test finding", "type": "model"},
+        ]
+        manager.update_state(evaluation, findings)
+
+        # Check findings_history exists
+        assert "findings_history" in manager.state
+        assert len(manager.state["findings_history"]) == 1
+        assert manager.state["findings_history"][0]["findings_count"] == 1
+
+        # Check findings JSON file was created
+        findings_file = tmp_path / "research" / "iteration_1_findings.json"
+        assert findings_file.exists()
+    print("    PASSED")
+
+
 def main():
     print("Running Runtime Manager Tests...")
     test_runtime_manager_state_load_save()
@@ -865,6 +1110,16 @@ def main():
     test_claim_tracking_no_typeerror_with_dicts()
     test_claim_tracking_backward_compatibility()
     test_helper_methods()
+    # New tests for research queue and repetition detection
+    test_research_queue_initialization()
+    test_research_queue_consume()
+    test_research_queue_add_items()
+    test_research_queue_focus()
+    test_iteration_similarity_identical()
+    test_iteration_similarity_different()
+    test_iteration_similarity_partial()
+    test_strategy_shift_suggestion()
+    test_findings_history_tracking()
     print("\nAll Runtime Manager Tests Passed!")
 
 
